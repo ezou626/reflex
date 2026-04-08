@@ -12,7 +12,8 @@
 struct{
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256+1024);
-} ringbuf SEC(".maps"); // ?
+} ringbuf SEC(".maps"); // Basically puts in the map section of .o 
+    // for the loader library (libbpf) to use
 
 struct execve_params{
     __u64 __unused;
