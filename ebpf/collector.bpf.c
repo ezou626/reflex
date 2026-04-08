@@ -16,8 +16,19 @@ struct payload{
     __u32 pid;
     __u64 syscall_id;
     __u64 cgroup_id; // for scheduling?
+    __u64 ts_ns;
     __u64 args[6];
 };
+
+/* temporary storage hashmap for enter */
+
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 10240);
+  __type(key, __u32); // keyed by thread id (single thread waits for syscall execution)
+  __type(value, __u64); // val start timestamp (stored)
+} enter_parking SEC(".maps");
+
 
 struct{
     __uint(type, BPF_MAP_TYPE_RINGBUF); // macro to initialize pointer with specific size to pass info
@@ -33,12 +44,23 @@ struct{
 
 
 SEC("tp/raw_syscalls/sys_enter")
+int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
+  __u32 tid = bpf_get_current_pid_tgid();
+  __u64 ts = bpf_ktime_get_ns();
+
+  bpf_map_update_elem(&start_times, &tid, &ts, BPF_ANY)
+}
+
+
+
+
 // trace_event_raw_sys_enter defined in header i think
 int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) { 
   // need to reserve some space first
-  struct payload *pl = bpf_ringbuf_reserve(&syscall_info_buffer, sizeof(struct event), 0);
+  struct payload *pl = bpf_ringbuf_reserve(&syscall_info_buffer, sizeof(*pl), 0);
   if (!evt) return 0;
 
+  pl->ts_ns = bpf_ktime_get_ns();
   pl->pid = bpf_get_current_pid_tgid() >> 32;
   pl->syscall_id = ctx->id;
   pl->cgroup_id = bpf_get_current_cgroup_id();
@@ -50,6 +72,10 @@ int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
   bpf_ringbuf_submit(evt, 0);
   return 0;
 }
+
+// now the exit so we can look at syscall latency
+SEC("tp/raw_syscalls/sys_exit")
+int detect_syscall_exit(struct )
 
 
 // tp/raw_syscalls/sys_enter is a standard tracepoint not a raw tracepoint
