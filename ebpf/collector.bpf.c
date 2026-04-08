@@ -15,6 +15,7 @@
 struct payload{
     __u32 pid;
     __u64 syscall_id;
+    __u64 cgroup_id; // for scheduling?
     __u64 args[6];
 };
 
@@ -32,7 +33,23 @@ struct{
 
 
 SEC("tp/raw_syscalls/sys_enter")
-int detect_syscall_enter()
+// trace_event_raw_sys_enter defined in header i think
+int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) { 
+  // need to reserve some space first
+  struct payload *pl = bpf_ringbuf_reserve(&syscall_info_buffer, sizeof(struct event), 0);
+  if (!evt) return 0;
+
+  pl->pid = bpf_get_current_pid_tgid() >> 32;
+  pl->syscall_id = ctx->id;
+  pl->cgroup_id = bpf_get_current_cgroup_id();
+
+  #pragma unroll
+  for (int i = 0; i < 6; i++) {
+    evt->args[i] = ctx->args[i];
+  }
+  bpf_ringbuf_submit(evt, 0);
+  return 0;
+}
 
 
 // tp/raw_syscalls/sys_enter is a standard tracepoint not a raw tracepoint
