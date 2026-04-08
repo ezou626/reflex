@@ -1,0 +1,3 @@
+[submodule "external/KernMLOps"]
+	path = external/KernMLOps
+	url = https://github.com/ldos-project/KernMLOps.git
