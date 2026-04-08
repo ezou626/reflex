@@ -18,8 +18,8 @@ struct payload{
     __u64 cgroup_id; // for scheduling?
     __s64 ret_val;
     __u64 dur_ns;
-    __u64 args[6];
-};
+    // __u64 args[6];
+} __attribute__((packed)); // need attribute packed so 32bit one doesnt mess it up
 
 /* temporary storage hashmap for enter */
 
@@ -49,7 +49,7 @@ int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
   u32 tid = bpf_get_current_pid_tgid();
   u64 ts = bpf_ktime_get_ns();
 
-  bpf_map_update_elem(&start_times, &tid, &ts, BPF_ANY);
+  bpf_map_update_elem(&enter_parking, &tid, &ts, BPF_ANY);
   return 0;
 
   /* no longer sending to user space for enter */
@@ -66,7 +66,7 @@ int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
 // now the exit so we can look at syscall latency
 
 SEC("tp/raw_syscalls/sys_exit")
-int detect_syscall_exit(struct trace_event_raw_sys_enter *ctx) { 
+int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) { 
   // need to reserve some space first
 
 

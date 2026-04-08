@@ -46,7 +46,7 @@ $(COLLECTOR): $(EBPF_DIR)/collector.bpf.c
 	$(CLANG) -g -O2 -target bpf -I ./src -c $< -o $@
 
 $(LOADER): $(SRC_DIR)/loader.c 
-	$(CLANG) -O2 -g -Wall -I/usr/include -I/usr/include/bpf -o $@ $< -lbpf
+	$(CLANG) -O2 -g -Wall -I/usr/include -I/usr/include/bpf -I./build -I./src -o $@ $< -lbpf
 
 clean:
 	rm -f
