@@ -32,6 +32,8 @@ COMMON_PKGS=(
   build-essential
   clang
   libbpf-dev
+  bpfcc-tools
+  python3-bpfcc
   stress-ng
   fio
   qemu-system-x86
@@ -61,10 +63,14 @@ if ! command -v perf >/dev/null 2>&1; then
 fi
 
 echo "[reflex] Syncing Python environment with uv (using uv.lock if present)..."
+# BCC comes from the distro (python3-bpfcc); the venv needs system site packages to import it.
+uv venv --system-site-packages --allow-existing
 uv sync
 
 echo
 echo "[reflex] Setup complete. Next steps:"
 echo "  - Ensure \"$HOME/.local/bin\" is in your PATH for uv commands."
-echo "  - To run the daemon (once implemented), use:"
+echo "  - Initialize optional reference submodule (KernMLOps):"
+echo "      git submodule update --init external/KernMLOps"
+echo "  - Run the MVP ring-buffer collector (needs root for eBPF load):"
 echo "      sudo uv run python daemon/main.py"
