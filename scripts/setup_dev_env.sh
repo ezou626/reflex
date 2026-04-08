@@ -34,6 +34,7 @@ COMMON_PKGS=(
   libbpf-dev
   bpfcc-tools
   python3-bpfcc
+  cloud-image-utils
   stress-ng
   fio
   qemu-system-x86

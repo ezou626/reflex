@@ -212,6 +212,7 @@ Installs:
 - stress-ng
 - fio
 - qemu-system-x86 (QEMU/KVM for running test VMs)
+- cloud-image-utils (`cloud-localds` for QEMU cloud-image tests, e.g. `scripts/test_mvp_qemu.sh`)
 
 Python dependencies are managed with **uv** using `pyproject.toml` and `uv.lock`. The setup script runs `uv sync` to create/update the project environment from the lockfile.
 
