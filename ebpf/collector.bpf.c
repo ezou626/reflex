@@ -6,26 +6,36 @@
 /* Struct to store event */
 
 
-/* Code snippet courtesy of falco.org */
+/* Code snippet adopted in part from falco.org */
 /* This version will send data to userspace using a ringbuf */
 
+
+
+
+struct payload{
+    __u32 pid;
+    __u64 syscall_id;
+    __u64 args[6];
+};
+
 struct{
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256+1024);
-} ringbuf SEC(".maps"); // Basically puts in the map section of .o 
+    __uint(type, BPF_MAP_TYPE_RINGBUF); // macro to initialize pointer with specific size to pass info
+    __uint(max_entries, 256 * 1024);
+} syscall_info_buffer SEC(".maps"); // Basically puts in the map section of .o 
     // for the loader library (libbpf) to use
 
-struct execve_params{
-    __u64 __unused;
-    __u64 __unused2;
-    char* filename;
-};
+// tp and tracepoint are interchangable
+// see tps.txt for full list, but if you are using RAW tracepoints theres just enter and exit
 
-struct event{
-    int pid;
-    char filename[512];
-};
+// SEC("raw_tp/sys_enter")
+// this is the true raw version which handles the registers ^^ 
 
+
+SEC("tp/raw_syscalls/sys_enter")
+int detect_syscall_enter()
+
+
+// tp/raw_syscalls/sys_enter is a standard tracepoint not a raw tracepoint
 
 SEC("tp/syscalls/sys_enter_execve")
 int detect_execve(struct execve_params* params)
