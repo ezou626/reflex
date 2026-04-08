@@ -33,6 +33,7 @@
 CLANG ?= clang
 
 SRC_DIR := src
+EBPF_DIR := ebpf
 BUILD_DIR := build
 
 LOADER := $(BUILD_DIR)/loader
@@ -41,10 +42,10 @@ COLLECTOR := $(BUILD_DIR)/collector.bpf.o
 
 all: $(COLLECTOR) $(LOADER)
 
-$(COLLECTOR): $(SRC_DIR)/collector.bpf.c
-	$(CLANG) -g -O2 -target bpf -c $< -o $@
+$(COLLECTOR): $(EBPF_DIR)/collector.bpf.c
+	$(CLANG) -g -O2 -target bpf -I ./src -c $< -o $@
 
-$(LOADER):
+$(LOADER): $(SRC_DIR)/loader.c 
 	$(CLANG) -O2 -g -Wall -I/usr/include -I/usr/include/bpf -o $@ $< -lbpf
 
 clean:
