@@ -1,13 +1,21 @@
-#include <linux/bpf.h>
 #include <bpf/libbpf.h>
 #include <stdio.h>
 #include <unistd.h>
 
+#include <sys.resource.h>
+#include "collector.skel.h"
 
-struct event{
-    __u32 pid;
-    char filename[512];
-};
+
+// struct event{
+//     __u32 pid;
+//     char filename[512];
+// };
+
+struct payload {
+    
+}
+
+
 
 static int event_logger(void* ctx, void* data, size_t len) {
     struct event* evt = (struct event*) data;
@@ -19,7 +27,7 @@ int main(){
     const char* filename = "collector.bpf.o"; // improve this
     const char* mapname = "ringbuf";
     const char* progname = "detect_execve";
-    struct bpf_object *bpfObject = bpf_object__open(filename); // ?
+    struct bpf_object *bpfObject = bpf_object__open(filename); 
     if(!bpfObject) {
         printf("Error! Failed to loan %s\n", filename);
         return 1;
