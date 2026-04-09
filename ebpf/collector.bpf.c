@@ -9,7 +9,8 @@
 /* Code snippet adopted in part from falco.org */
 /* This version will send data to userspace using a ringbuf */
 
-
+volatile const __u32 python_pid = 0;
+volatile const __u32 loader_pid = 0;
 
 
 struct payload{
@@ -48,11 +49,16 @@ SEC("tp/raw_syscalls/sys_enter")
 int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
   u32 tid = bpf_get_current_pid_tgid();
   u64 ts = bpf_ktime_get_ns();
+  u32 pid = bpf_get_current_pid_tgid() >> 32;
+
+  if (pid == python_pid || pid == loader_pid) {
+    return 0; // drop / exit early if its catching the program itself
+  }
 
   bpf_map_update_elem(&enter_parking, &tid, &ts, BPF_ANY);
   return 0;
 
-  /* no longer sending to user space for enter */
+  /* no longer sending return vals to user space for enter */
   //   #pragma unroll
   // for (int i = 0; i < 6; i++) {
   //   evt->args[i] = ctx->args[i];

@@ -38,6 +38,8 @@ BUILD_DIR := build
 
 LOADER := $(BUILD_DIR)/loader
 COLLECTOR := $(BUILD_DIR)/collector.bpf.o
+SKEL_H := $(BUILD_DIR)/collector.skel.h # new for skeleton to be generated in between
+# ^ maybe move to src?
 
 
 all: $(COLLECTOR) $(LOADER)
@@ -45,11 +47,13 @@ all: $(COLLECTOR) $(LOADER)
 $(COLLECTOR): $(EBPF_DIR)/collector.bpf.c
 	$(CLANG) -g -O2 -target bpf -I ./src -c $< -o $@
 
-$(LOADER): $(SRC_DIR)/loader.c 
+$(SKEL_H): $(COLLECTOR)
+	bpftool gen skeleton $< > $@
+
+$(LOADER): $(SRC_DIR)/loader.c $(SKEL_H)
 	$(CLANG) -O2 -g -Wall -I/usr/include -I/usr/include/bpf -I./build -I./src -o $@ $< -lbpf
 
 clean:
-	rm -f
-
+	rm -rf $(BUILD_DIR)
 
 # add to test git
