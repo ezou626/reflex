@@ -3,7 +3,7 @@
 - **Clone and setup**
   - `git clone <this-repo>`
   - `cd reflex`
-  - `git submodule update --init external/KernMLOps` (optional; reference for eBPF/BCC patterns, see [KernMLOps](https://github.com/ldos-project/KernMLOps))
+  - `git submodule update --init external/KernMLOps external/bpftune` (optional; references for eBPF/BCC patterns and tuning architecture)
   - `scripts/setup_dev_env.sh`
 
 - **Key directories**
@@ -12,6 +12,7 @@
   - `scripts/` – `setup_dev_env.sh`, `test_mvp_qemu.sh`, etc.
   - `src/reflex/` – Python package stub for uv
   - `external/KernMLOps/` – optional reference submodule
+  - `external/bpftune/` – optional baseline reference for tuner/event concepts ([oracle/bpftune](https://github.com/oracle/bpftune))
 
 - **MVP: ring buffer → JSONL files (on the host)**
   - **Requires a real Linux environment** (bare metal, VM, or WSL2 with eBPF/BCC working) and **root** to load programs.
@@ -37,5 +38,18 @@
   - Needs read access to `/dev/kvm` (add your user to group `kvm` and re-open WSL, or run the script with `sudo`).
   - `cloud-image-utils` (for `cloud-localds`) is installed by `scripts/setup_dev_env.sh`; install manually only if you skipped setup: `sudo apt install cloud-image-utils`.
   - `bash scripts/test_mvp_qemu.sh` or `sudo bash scripts/test_mvp_qemu.sh`
-  - First run downloads the Ubuntu 24.04 cloud image (~600 MiB) into `~/.cache/reflex-qemu` (or `REFLEX_VM_CACHE`).
+  - First run downloads the Ubuntu 24.04 cloud image (~600 MiB) into `data/qemu` by default (or `REFLEX_VM_CACHE`).
   - The script expands the guest disk to **20 GiB** by default (`REFLEX_VM_DISK_GB`); the stock cloud image is too small for BCC + kernel headers + LLVM without that.
+
+- **Tuning framework dev loop**
+  - Daemon now supports a separate decision/action stream:
+    - `--run-id`, `--run-dir` for run artifacts under `data/runs/<run-id>`
+    - `--decision-log-output` for decision/action/rollback JSONL
+    - `--policy-file` and `--tuner-catalog` for control-plane config
+    - `--dry-run` for baseline collection without applying tunables
+  - Benchmark + profile loop:
+    - `bash benchmarks/run_profile.sh cpu_bound baseline`
+    - `bash benchmarks/run_profile.sh cpu_bound tuned`
+    - `python benchmarks/scorecard.py data/runs/<baseline>/summary.jsonl data/runs/<tuned>/summary.jsonl`
+  - End-to-end QEMU-backed loop:
+    - `bash scripts/run_dev_loop_qemu.sh cpu_bound`

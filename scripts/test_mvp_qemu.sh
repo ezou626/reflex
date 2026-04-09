@@ -9,7 +9,7 @@
 #   sudo bash scripts/test_mvp_qemu.sh
 #
 # Env:
-#   REFLEX_VM_CACHE    - cache directory (default: ~/.cache/reflex-qemu, or $HOME under sudo)
+#   REFLEX_VM_CACHE    - cache directory (default: ./data/qemu in this repo)
 #   REFLEX_VM_SSH_PORT - host TCP port forwarded to guest :22 (default: 52222)
 #   REFLEX_VM_DISK_GB  - guest root disk size in GiB (default: 20; BCC+headers+LLVM needs space)
 
@@ -19,9 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${SCRIPT_DIR%/scripts}"
 cd "${REPO_ROOT}"
 
-# With `sudo bash`, $HOME is often /root — cache and keys live there unless you
-# set REFLEX_VM_CACHE to e.g. /home/you/.cache/reflex-qemu.
-CACHE_DIR="${REFLEX_VM_CACHE:-${HOME}/.cache/reflex-qemu}"
+# Cache defaults to an in-repo gitignored location so VM artifacts survive across
+# guest lifetimes and are easy to inspect from the host.
+CACHE_DIR="${REFLEX_VM_CACHE:-${REPO_ROOT}/data/qemu}"
 SSH_PORT="${REFLEX_VM_SSH_PORT:-52222}"
 DISK_GB="${REFLEX_VM_DISK_GB:-20}"
 BASE_NAME="noble-server-cloudimg-amd64.img"

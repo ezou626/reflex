@@ -20,9 +20,17 @@ import math
 import signal
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from action_log import ActionLogger
+from decision_engine import DecisionEngine, TuningPolicy
+from history import WindowHistory
+from rollback import RollbackManager
+from tuners.base import AppliedAction
+from tuners.registry import TunerRegistry
 
 EVENT_EXEC = 1
 EVENT_FORK = 2
@@ -70,6 +78,14 @@ PHASE1_METRIC_CONTRACTS: dict[str, dict[str, Any]] = {
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _default_run_id() -> str:
+    return time.strftime("run-%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+
+
+def _default_run_dir(run_id: str) -> Path:
+    return _repo_root() / "data" / "runs" / run_id
 
 
 def _decode_comm(raw: Any) -> str:
@@ -366,6 +382,47 @@ def main() -> int:
         default=1.0,
         help="sampling interval for /proc-/sys host features (default: 1.0)",
     )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default="",
+        help="Run identifier for decision/action history.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Optional run artifact directory (default: data/runs/<run-id>).",
+    )
+    parser.add_argument(
+        "--decision-log-output",
+        type=Path,
+        default=None,
+        help="Decision/action/rollback JSONL output path.",
+    )
+    parser.add_argument(
+        "--policy-file",
+        type=Path,
+        default=_repo_root() / "configs" / "tuning_policy.yaml",
+        help="Tuning policy config file.",
+    )
+    parser.add_argument(
+        "--tuner-catalog",
+        type=Path,
+        default=_repo_root() / "configs" / "tuner_catalog.yaml",
+        help="Tuner catalog config file.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Emit decisions without changing kernel tunables.",
+    )
+    parser.add_argument(
+        "--event-trigger-threshold",
+        type=int,
+        default=8000,
+        help="Trigger an early decision tick if window event volume exceeds this.",
+    )
     args = parser.parse_args()
 
     bpf_c = _repo_root() / "ebpf" / "mvp_ringbuf.bpf.c"
@@ -373,8 +430,28 @@ def main() -> int:
         print(f"error: missing eBPF source: {bpf_c}", file=sys.stderr)
         return 1
 
+    run_id = args.run_id or _default_run_id()
+    run_dir = args.run_dir or _default_run_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if args.output == (_repo_root() / "data" / "mvp_events.jsonl"):
+        args.output = run_dir / "events.jsonl"
+    if args.summary_output == (_repo_root() / "data" / "mvp_summary.jsonl"):
+        args.summary_output = run_dir / "summary.jsonl"
+    decision_log = args.decision_log_output or (run_dir / "decisions.jsonl")
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+    decision_log.parent.mkdir(parents=True, exist_ok=True)
+
+    policy = TuningPolicy.from_file(args.policy_file)
+    history = WindowHistory(size=max(60, policy.evaluate_after_windows + 5))
+    decision_engine = DecisionEngine(policy=policy)
+    rollback_manager = RollbackManager(policy=policy)
+    tuner_registry = TunerRegistry.from_catalog(args.tuner_catalog)
+    action_logger = ActionLogger(path=decision_log, run_id=run_id)
+    active_action: AppliedAction | None = None
+    active_action_window_id = 0
+    should_decide_early = False
     b = BPF(src_file=str(bpf_c))
 
     running = True
@@ -398,15 +475,75 @@ def main() -> int:
     ):
 
         def on_event(_ctx: Any, data: Any, _size: int) -> None:
+            nonlocal should_decide_early
             ev = b["events"].event(data)
             event = _to_event_dict(ev)
             raw_out.write(json.dumps(event, ensure_ascii=False) + "\n")
             window.add_event(event)
+            if sum(window.event_counts.values()) >= args.event_trigger_threshold:
+                should_decide_early = True
+
+        def decision_tick(trigger: str, summary: dict[str, Any]) -> None:
+            nonlocal active_action
+            nonlocal active_action_window_id
+            history.add(summary)
+            comparison = history.compare_last_two(policy.compare_metrics)
+            proposals = tuner_registry.collect_proposals(summary, history.latest(20))
+            decision = decision_engine.decide(
+                trigger=trigger,
+                summary=summary,
+                history=history.latest(20),
+                proposals=proposals,
+            )
+            window_id = action_logger.log_decision(
+                trigger=trigger,
+                decision=decision,
+                summary=summary,
+                comparison_delta=None if comparison is None else comparison.delta,
+            )
+            chosen = decision.chosen_action
+            if chosen is not None:
+                tuner = tuner_registry.get(chosen.tuner_id)
+                if tuner is not None:
+                    try:
+                        applied = tuner.apply(chosen, dry_run=args.dry_run)
+                        active_action = applied
+                        active_action_window_id = window_id
+                        action_logger.log_apply(window_id, applied)
+                    except OSError as exc:
+                        action_logger.log_rollback(
+                            window_id=window_id,
+                            applied=AppliedAction(action=chosen, previous_value=None),
+                            reason=f"apply_failed:{exc}",
+                            effects={},
+                            ok=False,
+                        )
+            if active_action is not None:
+                rb = rollback_manager.evaluate(active_action, history)
+                if rb.should_rollback:
+                    tuner = tuner_registry.get(active_action.action.tuner_id)
+                    ok = False
+                    if tuner is not None:
+                        try:
+                            ok = tuner.rollback(active_action, dry_run=args.dry_run)
+                        except OSError:
+                            ok = False
+                    action_logger.log_rollback(
+                        window_id=active_action_window_id or window_id,
+                        applied=active_action,
+                        reason=rb.reason,
+                        effects=rb.effects,
+                        ok=ok,
+                    )
+                    active_action = None
+                    active_action_window_id = 0
+                    decision_engine.note_rollback()
 
         b["events"].open_ring_buffer(on_event)
         print(
             f"Writing raw events to {args.output} and summaries to "
-            f"{args.summary_output}. Ctrl+C to stop.",
+            f"{args.summary_output}. Decisions to {decision_log}. "
+            f"Run ID: {run_id}. Ctrl+C to stop.",
             flush=True,
         )
 
@@ -421,15 +558,23 @@ def main() -> int:
             if now - window.started_ts >= args.window_sec:
                 summary = _build_summary(window, host_features, now, args.window_sec)
                 summary_out.write(json.dumps(summary, ensure_ascii=False) + "\n")
+                decision_tick(trigger="timer_window", summary=summary)
                 window = WindowState(started_ts=now)
+                should_decide_early = False
+            elif should_decide_early:
+                summary = _build_summary(window, host_features, now, args.window_sec)
+                decision_tick(trigger="event_burst", summary=summary)
+                should_decide_early = False
 
         # Flush final partial window for better test ergonomics.
         now = time.time()
         if window.event_counts or window.sys_exit_count or window.rq_latency_samples_us:
             summary = _build_summary(window, host_features, now, args.window_sec)
             summary_out.write(json.dumps(summary, ensure_ascii=False) + "\n")
+            decision_tick(trigger="shutdown_flush", summary=summary)
         print("Stopped.", flush=True)
         b.cleanup()
+    action_logger.close()
     return 0
 
 

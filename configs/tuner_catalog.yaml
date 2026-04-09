@@ -1,0 +1,3 @@
+tuners:
+  - id: sysctl_swappiness
+    enabled: true

@@ -63,6 +63,10 @@ Structured Logging + Rollback
 - Minimal system overhead
 - Auditability via structured logs
 
+Baseline references informing this structure:
+- `external/bpftune` ([oracle/bpftune](https://github.com/oracle/bpftune)) for tuner/event model, explicit decision "why", and strategy-oriented control loops
+- `external/KernMLOps` for telemetry/benchmark workflow patterns
+
 ---
 
 ## Target Environment
@@ -121,36 +125,33 @@ reflex/
 │
 ├── daemon/
 │   ├── main.py
-│   ├── feature_engineering.py
 │   ├── decision_engine.py
-│   ├── logger.py
+│   ├── history.py
+│   ├── action_log.py
 │   ├── rollback.py
 │   └── tuners/
 │       ├── base.py
-│       ├── cpu_tuner.py
-│       ├── memory_tuner.py
-│       └── io_tuner.py
+│       ├── registry.py
+│       └── sysctl.py
 │
 ├── benchmarks/
-│   ├── cpu_profile.sh
-│   ├── io_profile.sh
-│   ├── memory_profile.sh
-│   └── mixed_profile.sh
-│
-├── experiments/
-│   ├── collected_data/
-│   ├── models/
-│   └── notebooks/
+│   ├── run_profile.sh
+│   └── scorecard.py
 │
 ├── configs/
+│   ├── features_schema.yaml
 │   ├── profiles.yaml
-│   └── tunables.yaml
+│   ├── tuner_catalog.yaml
+│   └── tuning_policy.yaml
 │
 ├── scripts/
 │   ├── setup_dev_env.sh
-│   ├── run_vm.sh
-│   ├── run_benchmark.sh
-│   └── reset_sysctl.sh
+│   ├── test_mvp_qemu.sh
+│   └── run_dev_loop_qemu.sh
+│
+├── external/
+│   ├── KernMLOps/
+│   └── bpftune/
 │
 └── README.md
 ```

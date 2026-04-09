@@ -1,0 +1,17 @@
+profiles:
+  cpu_bound:
+    command: stress-ng --cpu 2 --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
+  io_bound:
+    command: fio --name=randrw --filename=/tmp/reflex-fio.bin --rw=randrw --bs=4k --size=256M --numjobs=2 --runtime=30 --time_based --group_reporting
+    duration_sec: 30
+    warmup_sec: 5
+  memory_pressure:
+    command: stress-ng --vm 2 --vm-bytes 70% --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
+  mixed_desktop:
+    command: stress-ng --cpu 1 --vm 1 --vm-bytes 40% --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
