@@ -1,3 +1,6 @@
 [submodule "external/KernMLOps"]
 	path = external/KernMLOps
 	url = https://github.com/ldos-project/KernMLOps.git
+[submodule "external/bpftune"]
+	path = external/bpftune
+	url = https://github.com/oracle/bpftune.git
