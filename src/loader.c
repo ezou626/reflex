@@ -13,6 +13,7 @@
 
 struct payload{
     uint32_t tid;
+    uint32_t pid;
     uint64_t syscall_id;
     uint64_t cgroup_id; // for scheduling?
     int64_t ret_val;
@@ -82,7 +83,6 @@ int main(int argc, char **argv){
 
     while(1) {
         ring_buffer__poll(rb, 100); // second value is how often to poll (like adding sleep to loop)
-        fprintf(stderr, "Loop\n");
     }
 
 cleanup:

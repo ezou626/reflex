@@ -5,7 +5,7 @@ import os
 import subprocess
 from bcc import syscall # can use bcc just for this, looks up architecture
 
-STRUCT_FORMAT = "I Q Q q Q"
+STRUCT_FORMAT = "I I Q Q q Q"
 STRUCT_SIZE = struct.calcsize(STRUCT_FORMAT)
 
 
@@ -63,11 +63,11 @@ def main():
                 break
             data = struct.unpack(STRUCT_FORMAT, raw_data)
             # set to the right variables
-            tid, syscall_id, cgroup_id, ret_val, dur_ns = data
+            tid, pid, syscall_id, cgroup_id, ret_val, dur_ns = data
             # if syscall_id not in sc_dict:
             #     continue
             name = get_syscall_name(syscall_id)
-            print(f"HI: tid {tid} called {name}")
+            print(f"HI: tid {tid} pid {pid} called {name} with return {ret_val}")
     except KeyboardInterrupt:
         pass
 

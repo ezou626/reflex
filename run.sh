@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# make sure dependencies are installed like ausyscall
+
+
 if [ "build/collector.bpf.o" -nt "collector.skel.h" ] || [ ! -f "collector.skel.h"]; then
     bpftool gen skeleton build/collector.bpf.o > build/collector.skel.h
 fi
@@ -17,4 +20,4 @@ make
 # switched to python driving for now. Run from repo root
 # cd build && sudo ./loader | python3 ../src/parser.py&
 
-python3 src/parser.py
+python3 src/parser.py > log

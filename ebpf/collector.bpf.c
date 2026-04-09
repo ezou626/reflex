@@ -15,6 +15,7 @@ volatile const __u32 loader_pid = 0;
 
 struct payload{
     __u32 tid;
+    __u32 pid;
     __u64 syscall_id;
     __u64 cgroup_id; // for scheduling?
     __s64 ret_val;
