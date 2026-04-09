@@ -11,4 +11,4 @@ if [ ! -f "src/vmlinux.h" ]; then
     fi
 fi
 make
-cd build && sudo ./loader
+cd build && sudo ./loader | python3 ../src/parser.py
