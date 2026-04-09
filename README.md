@@ -13,16 +13,25 @@
   - `src/reflex/` – Python package stub for uv
   - `external/KernMLOps/` – optional reference submodule
 
-- **MVP: ring buffer → JSONL file (on the host)**
+- **MVP: ring buffer → JSONL files (on the host)**
   - **Requires a real Linux environment** (bare metal, VM, or WSL2 with eBPF/BCC working) and **root** to load programs.
   - **Dependencies:** run `scripts/setup_dev_env.sh` once. It installs **`python3-bpfcc`** (and friends) from apt and runs **`uv venv --system-site-packages`** so `uv run` can import the distro **bcc** module. If `import bcc` fails, re-run setup or: `uv venv --system-site-packages --allow-existing && uv sync`.
-  - Loads `ebpf/mvp_ringbuf.bpf.c` via BCC, traces `sched:sched_process_exec`, appends one JSON object per line (default file: `data/mvp_ringbuf.jsonl`).
+  - Loads `ebpf/mvp_ringbuf.bpf.c` via BCC and collects Phase-1 metrics:
+    - process churn (`fork`/`exec`/`exit`)
+    - context switch rate (`sched_switch`)
+    - syscall error rate (`raw_syscalls:sys_exit`)
+    - wakeup->oncpu latency (`sched_wakeup` + `sched_switch`)
   - Run from repo root:
     - `sudo uv run python daemon/main.py`
-    - `sudo uv run python daemon/main.py -o /tmp/events.jsonl`
-    - Optional: `--timeout-ms 250` (ring buffer poll interval).
+    - `sudo uv run python daemon/main.py -o /tmp/events.jsonl --summary-output /tmp/summary.jsonl`
+    - Optional: `--timeout-ms 200 --window-sec 1.0 --proc-sample-sec 1.0`
   - Stop with **Ctrl+C**.
+  - Outputs:
+    - Raw events JSONL (`data/mvp_events.jsonl` by default)
+    - Window summaries JSONL (`data/mvp_summary.jsonl` by default)
   - **Alternative without uv:** `sudo python3 daemon/main.py` (same args) if **`python3-bpfcc`** is installed on the system interpreter.
+  - Feature contracts and ML-oriented schema live in `configs/features_schema.yaml`.
+  - Additional source catalog (for future collectors) lives in `docs/metrics_catalog.md`.
 
 - **MVP in QEMU/KVM (Ubuntu cloud image)**
   - Needs read access to `/dev/kvm` (add your user to group `kvm` and re-open WSL, or run the script with `sudo`).

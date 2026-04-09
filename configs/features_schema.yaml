@@ -1,0 +1,87 @@
+version: 1
+windowing:
+  sample_sec: 1.0
+  decision_window_sec: 10.0
+  aggregation:
+    - mean
+    - max
+    - std
+    - p95
+    - slope
+
+phase1_metric_contracts:
+  process_churn_rate_per_sec:
+    unit: events_per_sec
+    source: ebpf
+    probe: sched_process_fork|sched_process_exec|sched_process_exit
+    expected_range: [0, 100000]
+  context_switch_rate_per_sec:
+    unit: switches_per_sec
+    source: ebpf
+    probe: sched_switch
+    expected_range: [0, 1000000]
+  syscall_error_rate:
+    unit: ratio
+    source: ebpf
+    probe: raw_syscalls_sys_exit
+    expected_range: [0.0, 1.0]
+  rq_latency_us:
+    unit: us
+    source: ebpf
+    probe: sched_wakeup_to_sched_switch
+    expected_range: [0, 10000000]
+
+always_on_sources:
+  - name: proc_stat
+    path: /proc/stat
+    sample_sec: 1.0
+    features: [host_cpu_busy_ratio, host_ctxt_rate_per_sec]
+  - name: proc_meminfo
+    path: /proc/meminfo
+    sample_sec: 1.0
+    features: [host_mem_available_ratio, host_swap_free_ratio, host_dirty_kb]
+  - name: proc_loadavg
+    path: /proc/loadavg
+    sample_sec: 1.0
+    features: [host_loadavg_1m]
+  - name: psi
+    path: /proc/pressure/{cpu,memory,io}
+    sample_sec: 1.0
+    features:
+      - cpu_some_avg10
+      - memory_some_avg10
+      - io_some_avg10
+
+on_demand_sources:
+  - perf_stat
+  - pidstat
+  - iostat_x
+  - sar
+  - proc_pid_smaps
+  - journalctl
+
+ml_schema:
+  normalization:
+    counters_to_rates: true
+    long_tail_transform: log1p
+    robust_scaler: median_iqr
+    missingness_flags: true
+  metadata:
+    - kernel
+    - is_wsl
+    - cores
+    - ram_gb
+    - cgroup_mode
+  labels:
+    bottleneck_class:
+      - CPU_BOUND
+      - MEM_BOUND
+      - IO_BOUND
+      - SCHED_CONTENTION
+      - NET_BOUND
+      - MIXED
+      - IDLE
+    action_outcome:
+      - improved
+      - neutral
+      - regressed

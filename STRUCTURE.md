@@ -221,10 +221,19 @@ Python dependencies are managed with **uv** using `pyproject.toml` and `uv.lock`
 sudo uv run python daemon/main.py
 ```
 
-Optional flags:
-`--dry-run`
-`--safe-mode`
-`--no-apply`
+Current Phase-1 telemetry:
+- process churn (`fork`/`exec`/`exit`)
+- context switch rate (`sched_switch`)
+- syscall error rate (`raw_syscalls:sys_exit`)
+- wakeup->oncpu latency (`sched_wakeup` + `sched_switch`)
+- host-side low-overhead features from `/proc` and `/proc/pressure/*`
+
+Useful flags:
+`-o /tmp/events.jsonl`
+`--summary-output /tmp/summary.jsonl`
+`--timeout-ms 200`
+`--window-sec 1.0`
+`--proc-sample-sec 1.0`
 
 ### Benchmarking
 
