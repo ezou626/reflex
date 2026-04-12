@@ -1,2 +1,6 @@
 .venv/
 data/
+*.o
+/build
+/vmlinux.h
+src/vmlinux.h
