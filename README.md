@@ -51,5 +51,9 @@
     - `bash benchmarks/run_profile.sh cpu_bound baseline`
     - `bash benchmarks/run_profile.sh cpu_bound tuned`
     - `python benchmarks/scorecard.py data/runs/<baseline>/summary.jsonl data/runs/<tuned>/summary.jsonl`
+    - WSL-safe profile: `bash benchmarks/run_profile.sh wsl_safe baseline`
+  - Per-run report generation:
+    - `python benchmarks/report_run.py data/runs/<run-id>`
+    - `python benchmarks/report_run.py data/runs/<run-id> --format json --output data/runs/<run-id>/report.json`
   - End-to-end QEMU-backed loop:
     - `bash scripts/run_dev_loop_qemu.sh cpu_bound`
