@@ -4,3 +4,4 @@ data/
 /build
 /vmlinux.h
 src/vmlinux.h
+__pycache__/
