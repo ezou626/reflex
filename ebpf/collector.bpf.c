@@ -84,6 +84,7 @@ int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
   struct payload *pl = bpf_ringbuf_reserve(&syscall_info_buffer, sizeof(*pl), 0);
   if (pl) {
     pl->tid = tid;
+    pl->pid = bpf_get_current_pid_tgid() >> 32;
     pl->syscall_id = ctx->id;
     pl->ret_val = ctx->ret;
     pl->dur_ns = bpf_ktime_get_ns() - *start_ts;
