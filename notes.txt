@@ -1,0 +1,11 @@
+Apr 15
+
+- What is optimization goal
+- What are good explanatory (inputs)
+- What levers can be flipped
+
+For the output graphs
+
+1. Not using Reflex, just Linux
+2. Reflex without any tuning but with the overhead (just dumping info)
+3. Reflex opening 
