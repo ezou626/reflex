@@ -19,7 +19,7 @@ for arg in "$@"; do
 done
 
 mkdir -p build
-rm -f log
+# rm -rf data/runs
 
 # Generate skeleton if stale
 if [ ! -f "build/collector.skel.h" ] || [ "build/collector.bpf.o" -nt "build/collector.skel.h" ]; then
@@ -82,4 +82,4 @@ if [ $RUN_MEM -eq 1 ]; then
     launch_in_cgroup ./build/tester_mem /sys/fs/cgroup/reflex_mem
 fi
 
-python3 src/parser.py "${CGROUP_IDS[@]}"
+python3 daemon/main.py --cgroup-ids "${CGROUP_IDS[@]}"
