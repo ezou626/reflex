@@ -17,8 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import queue
 import signal
+import struct
+import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -31,6 +36,21 @@ from history import WindowHistory
 from rollback import RollbackManager
 from tuners.base import AppliedAction
 from tuners.registry import TunerRegistry
+
+# struct payload layout from collector.bpf.c (48 bytes, no padding)
+# fields: event_type, cpu, pid, tgid, ts_ns, value_i32, value_u32, comm[16]
+_PAYLOAD_FMT  = "=IIIIQiI16s"
+_PAYLOAD_SIZE = struct.calcsize(_PAYLOAD_FMT)  # 48
+
+
+class _Ev:
+    """Lightweight container for a deserialized payload struct."""
+    __slots__ = ("event_type", "cpu", "pid", "tgid", "ts_ns", "value_i32", "value_u32", "comm")
+
+    def __init__(self, fields: tuple) -> None:
+        (self.event_type, self.cpu, self.pid, self.tgid,
+         self.ts_ns, self.value_i32, self.value_u32, self.comm) = fields
+
 
 EVENT_EXEC = 1
 EVENT_FORK = 2
@@ -335,18 +355,6 @@ def _build_summary(
 
 
 def main() -> int:
-    try:
-        from bcc import BPF
-    except ImportError:
-        print(
-            "error: Python module 'bcc' not found. Install BCC bindings, e.g.\n"
-            "  sudo apt install python3-bpfcc bpfcc-tools\n"
-            "Then recreate the venv with system site packages, e.g.\n"
-            "  uv venv --system-site-packages --allow-existing && uv sync\n"
-            "(scripts/setup_dev_env.sh does this automatically.)",
-            file=sys.stderr,
-        )
-        return 1
 
     parser = argparse.ArgumentParser(
         description="Run Reflex Phase-1 telemetry collector (raw events + summaries)."
@@ -418,17 +426,19 @@ def main() -> int:
         help="Emit decisions without changing kernel tunables.",
     )
     parser.add_argument(
+        "--cgroup-ids",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Cgroup IDs to whitelist for syscall filtering (from run.sh). Omit to monitor all.",
+    )
+    parser.add_argument(
         "--event-trigger-threshold",
         type=int,
         default=8000,
         help="Trigger an early decision tick if window event volume exceeds this.",
     )
     args = parser.parse_args()
-
-    bpf_c = _repo_root() / "ebpf" / "mvp_ringbuf.bpf.c"
-    if not bpf_c.is_file():
-        print(f"error: missing eBPF source: {bpf_c}", file=sys.stderr)
-        return 1
 
     run_id = args.run_id or _default_run_id()
     run_dir = args.run_dir or _default_run_dir(run_id)
@@ -452,7 +462,21 @@ def main() -> int:
     active_action: AppliedAction | None = None
     active_action_window_id = 0
     should_decide_early = False
-    b = BPF(src_file=str(bpf_c))
+
+    loader_args = ["sudo", "./build/loader", str(os.getpid())]
+    loader_args += [str(c) for c in (args.cgroup_ids or [])]
+    loader_proc = subprocess.Popen(loader_args, stdout=subprocess.PIPE)
+    ev_queue: queue.Queue[_Ev] = queue.Queue()
+
+    def _reader() -> None:
+        assert loader_proc.stdout is not None
+        while True:
+            chunk = loader_proc.stdout.read(_PAYLOAD_SIZE)
+            if not chunk or len(chunk) < _PAYLOAD_SIZE:
+                break
+            ev_queue.put(_Ev(struct.unpack(_PAYLOAD_FMT, chunk)))
+
+    threading.Thread(target=_reader, daemon=True).start()
 
     running = True
 
@@ -476,7 +500,7 @@ def main() -> int:
 
         def on_event(_ctx: Any, data: Any, _size: int) -> None:
             nonlocal should_decide_early
-            ev = b["events"].event(data)
+            ev = data  # already a deserialized _Ev from the reader thread
             event = _to_event_dict(ev)
             raw_out.write(json.dumps(event, ensure_ascii=False) + "\n")
             window.add_event(event)
@@ -539,7 +563,6 @@ def main() -> int:
                     active_action_window_id = 0
                     decision_engine.note_rollback()
 
-        b["events"].open_ring_buffer(on_event)
         print(
             f"Writing raw events to {args.output} and summaries to "
             f"{args.summary_output}. Decisions to {decision_log}. "
@@ -548,7 +571,15 @@ def main() -> int:
         )
 
         while running:
-            b.ring_buffer_poll(timeout=args.timeout_ms)
+            deadline = time.monotonic() + args.timeout_ms / 1000.0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    on_event(None, ev_queue.get(timeout=remaining), _PAYLOAD_SIZE)
+                except queue.Empty:
+                    break
             now = time.time()
 
             if now >= next_proc_sample:
@@ -573,7 +604,8 @@ def main() -> int:
             summary_out.write(json.dumps(summary, ensure_ascii=False) + "\n")
             decision_tick(trigger="shutdown_flush", summary=summary)
         print("Stopped.", flush=True)
-        b.cleanup()
+        loader_proc.terminate()
+        loader_proc.wait()
     action_logger.close()
     return 0
 
