@@ -50,9 +50,10 @@ def get_syscall_name(syscall_id):
 
 def main():
     pid = os.getpid()
+    cgroup_ids = sys.argv[1:]  # cgroup IDs forwarded from run.sh
 
     loader_process = subprocess.Popen(
-        ["sudo", "./build/loader", str(pid)],
+        ["sudo", "./build/loader", str(pid)] + list(cgroup_ids),
         stdout=subprocess.PIPE # in order to pipe into python program
     )
     try:

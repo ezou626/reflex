@@ -37,12 +37,12 @@ static int handle_event(void *ctx, void *data, size_t data_size) {
 
 /* If stick with python (or can do with Cpp / Rust directly) send pid to loader to drop those */
 int main(int argc, char **argv){
-    fprintf(stderr, "ACTUALLY RUN THE PROGRAM\n");
-    uint32_t py_pid = 0;
-    if (argc > 1) {
-        py_pid = strtoul(argv[1], NULL, 10);
-        fprintf(stderr, "Py_pid %u\n", py_pid);
-    }
+    // fprintf(stderr, "ACTUALLY RUN THE PROGRAM\n");
+    // uint32_t py_pid = 0;
+    // if (argc > 1) {
+    //     py_pid = strtoul(argv[1], NULL, 10);
+    //     fprintf(stderr, "Py_pid %u\n", py_pid);
+    // }
 
     struct collector_bpf *skel;
     struct ring_buffer *rb = NULL;
@@ -60,13 +60,21 @@ int main(int argc, char **argv){
         return 1;
     }
 
-    skel->rodata->loader_pid = getpid();
-    skel->rodata->python_pid = py_pid;
+    // skel->rodata->loader_pid = getpid();
+    // skel->rodata->python_pid = py_pid;
+    // skel->rodata->target_pid = 
 
     err = collector_bpf__load(skel);
+
     if (err) {
         fprintf(stderr, "Failed to load skel %d", err);
         goto cleanup;
+    }
+
+    for (int i = 2; i < argc; i++) {
+        uint64_t cgid = strtoull(argv[i], NULL, 10);
+        uint8_t val = 1;
+        bpf_map__update_elem(skel->maps.cgroup_whitelist, &cgid, sizeof(cgid), &val, sizeof(val), BPF_ANY);
     }
 
     err = collector_bpf__attach(skel);

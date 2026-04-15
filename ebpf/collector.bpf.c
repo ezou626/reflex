@@ -32,6 +32,13 @@ struct {
   __type(value, u64); // val start timestamp (stored)
 } enter_parking SEC(".maps");
 
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 256);
+  __type(key, u64);   // cgroup id
+  __type(value, u8);  // presence flag
+} cgroup_whitelist SEC(".maps"); // for passing the programs to track to kernel side
+
 
 struct{
     __uint(type, BPF_MAP_TYPE_RINGBUF); // macro to initialize pointer with specific size to pass info
@@ -52,9 +59,15 @@ int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
   u64 ts = bpf_ktime_get_ns();
   u32 pid = bpf_get_current_pid_tgid() >> 32;
 
-  if (pid == python_pid || pid == loader_pid) {
-    return 0; // drop / exit early if its catching the program itself
-  }
+  // if (pid == python_pid || pid == loader_pid) {
+  //   return 0; // drop / exit early if its catching the program itself
+  // }
+
+  /* here is where filtering only on benchmarked programs is added (this is for )*/
+
+  u64 cgid = bpf_get_current_cgroup_id();
+  u8 *allowed = bpf_map_lookup_elem(&cgroup_whitelist, &cgid);
+  if (!allowed) return 0;  // not whitelisted, drop
 
   bpf_map_update_elem(&enter_parking, &tid, &ts, BPF_ANY);
   return 0;
@@ -78,6 +91,7 @@ int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 
 
   u32 tid = bpf_get_current_pid_tgid();
+  u64 cgid = bpf_get_current_cgroup_id();
   u64 *start_ts = bpf_map_lookup_elem(&enter_parking, &tid);
   if (!start_ts) return 0; // skip if no entry
 
@@ -86,6 +100,7 @@ int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
     pl->tid = tid;
     pl->pid = bpf_get_current_pid_tgid() >> 32;
     pl->syscall_id = ctx->id;
+    pl->cgroup_id = cgid;
     pl->ret_val = ctx->ret;
     pl->dur_ns = bpf_ktime_get_ns() - *start_ts;
 
