@@ -31,9 +31,17 @@ from pathlib import Path
 from typing import Any
 
 from action_log import ActionLogger
-from decision_engine import DecisionEngine, TuningPolicy
+from applied_stack import AppliedStack
+from baseline import parse_proc_cmdline, sysctl_baseline_at_start
+from config.loaders import load_tuning_policy
+from control import (
+    CompositeProposalController,
+    ExternalJsonlProposalController,
+    HeuristicProposalController,
+)
+from decision_engine import DecisionEngine
 from history import WindowHistory
-from rollback import RollbackManager
+from rollback import RollbackManager, frames_to_rollback
 from tuners.base import AppliedAction
 from tuners.registry import TunerRegistry
 
@@ -299,6 +307,19 @@ def _to_event_dict(ev: Any) -> dict[str, Any]:
     return base
 
 
+def _inject_run_baselines(
+    summary: dict[str, Any],
+    sysctl_baseline: dict[str, Any],
+    boot_params: dict[str, str | None],
+) -> dict[str, Any]:
+    out = dict(summary)
+    hf = dict(out.get("host_features", {}))
+    hf["sysctl_baseline_at_start"] = dict(sysctl_baseline)
+    hf["boot_kernel_params"] = dict(boot_params)
+    out["host_features"] = hf
+    return out
+
+
 def _build_summary(
     window: WindowState,
     host: dict[str, Any],
@@ -426,6 +447,12 @@ def main() -> int:
         help="Emit decisions without changing kernel tunables.",
     )
     parser.add_argument(
+        "--external-proposals",
+        type=Path,
+        default=None,
+        help="Optional JSONL file of external TunerAction dicts (one JSON object per line).",
+    )
+    parser.add_argument(
         "--cgroup-ids",
         nargs="*",
         type=int,
@@ -453,14 +480,26 @@ def main() -> int:
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
     decision_log.parent.mkdir(parents=True, exist_ok=True)
 
-    policy = TuningPolicy.from_file(args.policy_file)
+    policy = load_tuning_policy(args.policy_file)
+    boot_params = parse_proc_cmdline()
+    sysctl_baseline = sysctl_baseline_at_start(args.tuner_catalog)
     history = WindowHistory(size=max(60, policy.evaluate_after_windows + 5))
     decision_engine = DecisionEngine(policy=policy)
     rollback_manager = RollbackManager(policy=policy)
-    tuner_registry = TunerRegistry.from_catalog(args.tuner_catalog)
+    tuner_registry = TunerRegistry.from_catalog(
+        args.tuner_catalog, boot_params=boot_params
+    )
+    stack = AppliedStack(
+        run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
+    )
+    stack.load()
+    proposal_controllers: list = [HeuristicProposalController()]
+    if args.external_proposals is not None:
+        proposal_controllers.append(
+            ExternalJsonlProposalController(args.external_proposals)
+        )
+    proposal_pipeline = CompositeProposalController(proposal_controllers)
     action_logger = ActionLogger(path=decision_log, run_id=run_id)
-    active_action: AppliedAction | None = None
-    active_action_window_id = 0
     should_decide_early = False
 
     loader_args = ["sudo", "./build/loader", str(os.getpid())]
@@ -508,11 +547,12 @@ def main() -> int:
                 should_decide_early = True
 
         def decision_tick(trigger: str, summary: dict[str, Any]) -> None:
-            nonlocal active_action
-            nonlocal active_action_window_id
+            summary = _inject_run_baselines(summary, sysctl_baseline, boot_params)
             history.add(summary)
             comparison = history.compare_last_two(policy.compare_metrics)
-            proposals = tuner_registry.collect_proposals(summary, history.latest(20))
+            proposals = proposal_pipeline.propose(
+                summary, history.latest(20), registry=tuner_registry
+            )
             decision = decision_engine.decide(
                 trigger=trigger,
                 summary=summary,
@@ -525,42 +565,57 @@ def main() -> int:
                 summary=summary,
                 comparison_delta=None if comparison is None else comparison.delta,
             )
-            chosen = decision.chosen_action
-            if chosen is not None:
+            batch_index = 0
+            for chosen in decision.chosen_actions:
                 tuner = tuner_registry.get(chosen.tuner_id)
-                if tuner is not None:
-                    try:
-                        applied = tuner.apply(chosen, dry_run=args.dry_run)
-                        active_action = applied
-                        active_action_window_id = window_id
-                        action_logger.log_apply(window_id, applied)
-                    except OSError as exc:
-                        action_logger.log_rollback(
-                            window_id=window_id,
-                            applied=AppliedAction(action=chosen, previous_value=None),
-                            reason=f"apply_failed:{exc}",
-                            effects={},
-                            ok=False,
-                        )
-            if active_action is not None:
-                rb = rollback_manager.evaluate(active_action, history)
-                if rb.should_rollback:
-                    tuner = tuner_registry.get(active_action.action.tuner_id)
+                if tuner is None:
+                    batch_index += 1
+                    continue
+                try:
+                    applied = tuner.apply(chosen, dry_run=args.dry_run)
+                    seq = stack.push(applied, window_id, batch_index)
+                    depth = stack.depth()
+                    action_logger.log_apply(
+                        window_id,
+                        applied,
+                        apply_sequence=seq,
+                        stack_depth=depth,
+                        stack_index=depth - 1,
+                        batch_index=batch_index,
+                    )
+                except OSError as exc:
+                    action_logger.log_rollback(
+                        window_id=window_id,
+                        applied=AppliedAction(action=chosen, previous_value=None),
+                        reason=f"apply_failed:{exc}",
+                        effects={},
+                        ok=False,
+                    )
+                batch_index += 1
+
+            rb = rollback_manager.evaluate_for_top_of_stack(stack, history)
+            if rb.should_rollback:
+                frames = frames_to_rollback(stack, policy)
+                for fr in frames:
+                    applied = fr.to_applied_action()
+                    tuner = tuner_registry.get(fr.tuner_id)
                     ok = False
                     if tuner is not None:
                         try:
-                            ok = tuner.rollback(active_action, dry_run=args.dry_run)
+                            ok = tuner.rollback(applied, dry_run=args.dry_run)
                         except OSError:
                             ok = False
                     action_logger.log_rollback(
-                        window_id=active_action_window_id or window_id,
-                        applied=active_action,
+                        window_id=window_id,
+                        applied=applied,
                         reason=rb.reason,
                         effects=rb.effects,
                         ok=ok,
+                        apply_sequence=fr.apply_sequence,
+                        stack_depth=stack.depth(),
+                        stack_index=stack.depth(),
                     )
-                    active_action = None
-                    active_action_window_id = 0
+                if frames:
                     decision_engine.note_rollback()
 
         print(

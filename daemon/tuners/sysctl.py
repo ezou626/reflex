@@ -3,92 +3,93 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from config.schema import SysctlKind, TunerCatalogEntry
+
 from tuners.base import AppliedAction, BaseTuner, TunerAction
+from tuners.sysctl_util import read_sysctl, sysctl_name_to_path, write_sysctl
 
 
-class SysctlSwappinessTuner(BaseTuner):
-    tuner_id = "sysctl_swappiness"
+class GenericSysctlTuner(BaseTuner):
+    """Runtime sysctl effector built from catalog entry."""
 
-    def __init__(
-        self,
-        min_value: int = 10,
-        max_value: int = 90,
-        step: int = 5,
-        low_mem_ratio: float = 0.15,
-        high_mem_ratio: float = 0.35,
-    ) -> None:
-        self.min_value = min_value
-        self.max_value = max_value
-        self.step = step
-        self.low_mem_ratio = low_mem_ratio
-        self.high_mem_ratio = high_mem_ratio
+    def __init__(self, entry: TunerCatalogEntry) -> None:
+        if entry.scope != "runtime_sysctl":
+            raise ValueError("GenericSysctlTuner requires runtime_sysctl scope")
+        self._entry = entry
+        self.tuner_id = entry.id
+        self.sysctl_name = entry.sysctl
+        self.kind: SysctlKind = entry.kind
 
     @property
-    def _sysctl_path(self) -> Path:
-        return Path("/proc/sys/vm/swappiness")
-
-    def _read_swappiness(self) -> int:
-        return int(self._sysctl_path.read_text(encoding="utf-8").strip())
-
-    def _write_swappiness(self, value: int) -> None:
-        self._sysctl_path.write_text(f"{value}\n", encoding="utf-8")
+    def sysctl_path(self) -> Path:
+        return sysctl_name_to_path(self.sysctl_name)
 
     def supports(self, summary: dict[str, Any]) -> bool:
-        host = summary.get("host_features", {})
-        return "host_mem_available_ratio" in host
-
-    def propose(
-        self,
-        summary: dict[str, Any],
-        history: list[dict[str, Any]],
-    ) -> list[TunerAction]:
-        del history
-        host = summary.get("host_features", {})
-        mem_avail = float(host.get("host_mem_available_ratio", 1.0))
-        swap_free = float(host.get("host_swap_free_ratio", 1.0))
-        current = self._read_swappiness()
-
-        actions: list[TunerAction] = []
-        if mem_avail <= self.low_mem_ratio and swap_free > 0.2 and current < self.max_value:
-            new_value = min(self.max_value, current + self.step)
-            actions.append(
-                TunerAction(
-                    tuner_id=self.tuner_id,
-                    action_id="increase_swappiness",
-                    target="vm.swappiness",
-                    value=new_value,
-                    reason="Low memory availability; bias reclaim toward swap.",
-                    priority=50,
-                    metadata={"current": current, "mem_available_ratio": mem_avail},
-                )
-            )
-        elif mem_avail >= self.high_mem_ratio and current > self.min_value:
-            new_value = max(self.min_value, current - self.step)
-            actions.append(
-                TunerAction(
-                    tuner_id=self.tuner_id,
-                    action_id="decrease_swappiness",
-                    target="vm.swappiness",
-                    value=new_value,
-                    reason="Healthy free memory; reduce swap aggressiveness.",
-                    priority=40,
-                    metadata={"current": current, "mem_available_ratio": mem_avail},
-                )
-            )
-        return actions
+        del summary
+        try:
+            return self.sysctl_path.is_file()
+        except OSError:
+            return False
 
     def apply(self, action: TunerAction, dry_run: bool = False) -> AppliedAction:
-        previous = self._read_swappiness()
+        path = self.sysctl_path
+        previous = read_sysctl(path, self.kind)
         if not dry_run:
-            self._write_swappiness(int(action.value))
+            write_sysctl(path, action.value, self.kind)
         return AppliedAction(
             action=action,
             previous_value=previous,
-            metadata={"dry_run": dry_run},
+            metadata={"dry_run": dry_run, "sysctl": self.sysctl_name},
         )
 
     def rollback(self, applied: AppliedAction, dry_run: bool = False) -> bool:
         if dry_run:
             return True
-        self._write_swappiness(int(applied.previous_value))
+        write_sysctl(self.sysctl_path, applied.previous_value, self.kind)
         return True
+
+
+class BootCmdlineTuner(BaseTuner):
+    """Observability-only tuner for boot cmdline keys; apply does not change runtime kernel."""
+
+    def __init__(self, entry: TunerCatalogEntry, boot_params: dict[str, str | None]) -> None:
+        if entry.scope != "boot_cmdline":
+            raise ValueError("BootCmdlineTuner requires boot_cmdline scope")
+        self._entry = entry
+        self.tuner_id = entry.id
+        self._boot_params = boot_params
+
+    def supports(self, summary: dict[str, Any]) -> bool:
+        del summary
+        return self._entry.cmdline_key is not None
+
+    def apply(self, action: TunerAction, dry_run: bool = False) -> AppliedAction:
+        key = self._entry.cmdline_key or ""
+        prev = self._boot_params.get(key)
+        if prev is None and self._entry.default_cmdline_value is not None:
+            prev = self._entry.default_cmdline_value
+        return AppliedAction(
+            action=action,
+            previous_value=prev,
+            metadata={
+                "dry_run": dry_run,
+                "requires_reboot": True,
+                "effective": False,
+                "cmdline_key": key,
+            },
+        )
+
+    def rollback(self, applied: AppliedAction, dry_run: bool = False) -> bool:
+        del applied, dry_run
+        return True
+
+
+def build_tuner_for_entry(
+    entry: TunerCatalogEntry,
+    boot_params: dict[str, str | None],
+) -> BaseTuner:
+    if entry.scope == "runtime_sysctl":
+        return GenericSysctlTuner(entry)
+    if entry.scope == "boot_cmdline":
+        return BootCmdlineTuner(entry, boot_params)
+    raise ValueError(f"unknown scope: {entry.scope}")

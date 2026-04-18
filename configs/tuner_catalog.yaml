@@ -1,3 +1,87 @@
+version: 1
 tuners:
-  - id: sysctl_swappiness
+  - id: sysctl_vm_swappiness
+    category: vm
+    description: Tendency to reclaim anonymous pages vs page cache
+    scope: runtime_sysctl
+    sysctl: vm.swappiness
+    kind: int
     enabled: true
+  - id: sysctl_vm_dirty_ratio
+    category: vm
+    description: Ratio of dirty pages at which background writeback escalates
+    scope: runtime_sysctl
+    sysctl: vm.dirty_ratio
+    kind: int
+    enabled: false
+  - id: sysctl_vm_dirty_background_ratio
+    category: vm
+    description: Dirty memory percentage to start background writeback
+    scope: runtime_sysctl
+    sysctl: vm.dirty_background_ratio
+    kind: int
+    enabled: false
+  - id: sysctl_vm_vfs_cache_pressure
+    category: vm
+    description: Tendency to reclaim inode/dentry cache vs swap
+    scope: runtime_sysctl
+    sysctl: vm.vfs_cache_pressure
+    kind: int
+    enabled: false
+  - id: sysctl_net_core_somaxconn
+    category: net
+    description: Maximum listen backlog per socket
+    scope: runtime_sysctl
+    sysctl: net.core.somaxconn
+    kind: int
+    enabled: false
+  - id: sysctl_net_core_netdev_max_backlog
+    category: net
+    description: Max netdev receive queue backlog
+    scope: runtime_sysctl
+    sysctl: net.core.netdev_max_backlog
+    kind: int
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_rmem
+    category: net
+    description: Memory bounds for TCP receive buffer autotuning
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_rmem
+    kind: ints
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_wmem
+    category: net
+    description: Memory bounds for TCP send buffer autotuning
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_wmem
+    kind: ints
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_mem
+    category: net
+    description: Global TCP memory pressure thresholds in pages
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_mem
+    kind: ints
+    enabled: false
+  - id: sysctl_fs_aio_max_nr
+    category: fs
+    description: Maximum number of asynchronous I/O requests
+    scope: runtime_sysctl
+    sysctl: fs.aio-max-nr
+    kind: int
+    enabled: false
+  - id: sysctl_fs_file_max
+    category: fs
+    description: System-wide limit on open file handles
+    scope: runtime_sysctl
+    sysctl: fs.file-max
+    kind: int
+    enabled: false
+  - id: boot_cmdline_mitigations
+    category: boot
+    description: Kernel mitigations boot parameter if present on cmdline
+    scope: boot_cmdline
+    sysctl: ""
+    kind: str
+    cmdline_key: mitigations
+    enabled: false

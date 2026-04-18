@@ -1,7 +1,20 @@
-# Scalar values are parsed by daemon/decision_engine.py.
-compare_metrics: context_switch_rate_per_sec,syscall_error_rate,rq_latency_p95_us,rq_latency_p99_us,host_cpu_busy_ratio,host_mem_available_ratio
+# Tuning and decision selection policy (see daemon/config/schema.py).
+compare_metrics:
+  - context_switch_rate_per_sec
+  - syscall_error_rate
+  - rq_latency_p95_us
+  - rq_latency_p99_us
+  - host_cpu_busy_ratio
+  - host_mem_available_ratio
 min_windows_before_action: 3
 cooldown_windows: 2
 evaluate_after_windows: 3
 regression_threshold: 0.05
 improvement_threshold: 0.02
+decision_selection_mode: top_priority_only
+max_actions_per_tick: 1
+min_priority_gap: 0
+priority_floor: 0
+dedupe_by_target: false
+rollback_batch_granularity: per_frame
+max_tracked_applies: 64
