@@ -108,6 +108,9 @@ def load_tuner_catalog(path: Path) -> TunerCatalogDoc:
             raise ValueError(f"{path}: tuners[{i}] sysctl required for runtime_sysctl")
         if scope == "boot_cmdline" and not cmdline_key_s:
             raise ValueError(f"{path}: tuners[{i}] cmdline_key required for boot_cmdline")
+        min_value = item.get("min_value")
+        max_value = item.get("max_value")
+        step_raw  = item.get("step", 1)
         entries.append(
             TunerCatalogEntry(
                 id=tid,
@@ -120,6 +123,9 @@ def load_tuner_catalog(path: Path) -> TunerCatalogDoc:
                 default_cmdline_value=default_cv_s,
                 enabled=enabled,
                 tags=tags,
+                min_value=float(min_value) if min_value is not None else None,
+                max_value=float(max_value) if max_value is not None else None,
+                step=float(step_raw) if step_raw is not None else 1,
             )
         )
     return TunerCatalogDoc(version=version, tuners=entries)

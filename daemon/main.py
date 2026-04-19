@@ -35,6 +35,7 @@ from applied_stack import AppliedStack
 from baseline import parse_proc_cmdline, sysctl_baseline_at_start
 from config.loaders import load_tuning_policy
 from control import (
+    BOProposalController,
     CompositeProposalController,
     ExternalJsonlProposalController,
     HeuristicProposalController,
@@ -493,7 +494,12 @@ def main() -> int:
         run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
     )
     stack.load()
-    proposal_controllers: list = [HeuristicProposalController()]
+    heuristic = HeuristicProposalController()
+    bo_controller = BOProposalController(
+        evaluate_after_windows=policy.evaluate_after_windows,
+        fallback=heuristic,
+    )
+    proposal_controllers: list = [bo_controller]
     if args.external_proposals is not None:
         proposal_controllers.append(
             ExternalJsonlProposalController(args.external_proposals)
@@ -573,6 +579,7 @@ def main() -> int:
                     continue
                 try:
                     applied = tuner.apply(chosen, dry_run=args.dry_run)
+                    bo_controller.record_applied(chosen.tuner_id, int(chosen.value), summary)
                     seq = stack.push(applied, window_id, batch_index)
                     depth = stack.depth()
                     action_logger.log_apply(

@@ -42,21 +42,25 @@ class CompositeProposalController(ProposalController):
 
 
 class HeuristicProposalController(ProposalController):
-    """Hand-tuned heuristics (e.g. swappiness vs memory pressure)."""
+    """Hand-tuned heuristics for VM sysctl tuners."""
 
     def __init__(
         self,
-        min_swappiness: int = 10,
-        max_swappiness: int = 90,
-        step: int = 5,
         low_mem_ratio: float = 0.15,
         high_mem_ratio: float = 0.35,
+        high_dirty_kb: float = 50_000.0,
+        low_dirty_kb: float = 1_000.0,
     ) -> None:
-        self.min_swappiness = min_swappiness
-        self.max_swappiness = max_swappiness
-        self.step = step
         self.low_mem_ratio = low_mem_ratio
         self.high_mem_ratio = high_mem_ratio
+        self.high_dirty_kb = high_dirty_kb
+        self.low_dirty_kb = low_dirty_kb
+
+    def _read_int(self, sysctl_name: str) -> int | None:
+        try:
+            return int(read_sysctl(sysctl_name_to_path(sysctl_name), "int"))
+        except OSError:
+            return None
 
     def propose(
         self,
@@ -66,48 +70,96 @@ class HeuristicProposalController(ProposalController):
         registry: TunerRegistry,
     ) -> list[TunerAction]:
         del history
-        if not registry.is_enabled("sysctl_vm_swappiness"):
-            return []
-        tuner = registry.get("sysctl_vm_swappiness")
-        if tuner is None or not tuner.supports(summary):
-            return []
         host = summary.get("host_features", {})
-        if "host_mem_available_ratio" not in host:
-            return []
         mem_avail = float(host.get("host_mem_available_ratio", 1.0))
         swap_free = float(host.get("host_swap_free_ratio", 1.0))
-        path = sysctl_name_to_path("vm.swappiness")
-        try:
-            current = int(read_sysctl(path, "int"))
-        except OSError:
-            return []
+        dirty_kb  = float(host.get("host_dirty_kb", 0.0))
         actions: list[TunerAction] = []
-        if mem_avail <= self.low_mem_ratio and swap_free > 0.2 and current < self.max_swappiness:
-            new_value = min(self.max_swappiness, current + self.step)
-            actions.append(
-                TunerAction(
-                    tuner_id="sysctl_vm_swappiness",
-                    action_id="increase_swappiness",
-                    target="vm.swappiness",
-                    value=new_value,
-                    reason="Low memory availability; bias reclaim toward swap.",
-                    priority=50,
-                    metadata={"current": current, "mem_available_ratio": mem_avail},
-                )
-            )
-        elif mem_avail >= self.high_mem_ratio and current > self.min_swappiness:
-            new_value = max(self.min_swappiness, current - self.step)
-            actions.append(
-                TunerAction(
-                    tuner_id="sysctl_vm_swappiness",
-                    action_id="decrease_swappiness",
-                    target="vm.swappiness",
-                    value=new_value,
-                    reason="Healthy free memory; reduce swap aggressiveness.",
-                    priority=40,
-                    metadata={"current": current, "mem_available_ratio": mem_avail},
-                )
-            )
+
+        # vm.swappiness
+        if registry.is_enabled("sysctl_vm_swappiness"):
+            tuner = registry.get("sysctl_vm_swappiness")
+            if tuner is not None and tuner.supports(summary):
+                entry = tuner._entry
+                current = self._read_int("vm.swappiness")
+                if current is not None and entry.min_value is not None and entry.max_value is not None:
+                    if mem_avail <= self.low_mem_ratio and swap_free > 0.2 and current < entry.max_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_swappiness",
+                            action_id="increase_swappiness",
+                            target="vm.swappiness",
+                            value=min(int(entry.max_value), current + int(entry.step)),
+                            reason="Low memory; bias reclaim toward swap.",
+                            priority=50,
+                            metadata={"current": current, "mem_available_ratio": mem_avail},
+                        ))
+                    elif mem_avail >= self.high_mem_ratio and current > entry.min_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_swappiness",
+                            action_id="decrease_swappiness",
+                            target="vm.swappiness",
+                            value=max(int(entry.min_value), current - int(entry.step)),
+                            reason="Healthy free memory; reduce swap aggressiveness.",
+                            priority=40,
+                            metadata={"current": current, "mem_available_ratio": mem_avail},
+                        ))
+
+        # vm.dirty_ratio
+        if registry.is_enabled("sysctl_vm_dirty_ratio"):
+            tuner = registry.get("sysctl_vm_dirty_ratio")
+            if tuner is not None and tuner.supports(summary):
+                entry = tuner._entry
+                current = self._read_int("vm.dirty_ratio")
+                if current is not None and entry.min_value is not None and entry.max_value is not None:
+                    if dirty_kb > self.high_dirty_kb and current > entry.min_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_dirty_ratio",
+                            action_id="decrease_dirty_ratio",
+                            target="vm.dirty_ratio",
+                            value=max(int(entry.min_value), current - int(entry.step)),
+                            reason="High dirty memory; trigger writeback sooner.",
+                            priority=45,
+                            metadata={"current": current, "dirty_kb": dirty_kb},
+                        ))
+                    elif dirty_kb < self.low_dirty_kb and current < entry.max_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_dirty_ratio",
+                            action_id="increase_dirty_ratio",
+                            target="vm.dirty_ratio",
+                            value=min(int(entry.max_value), current + int(entry.step)),
+                            reason="Low dirty memory; allow more buffering before writeback.",
+                            priority=35,
+                            metadata={"current": current, "dirty_kb": dirty_kb},
+                        ))
+
+        # vm.vfs_cache_pressure
+        if registry.is_enabled("sysctl_vm_vfs_cache_pressure"):
+            tuner = registry.get("sysctl_vm_vfs_cache_pressure")
+            if tuner is not None and tuner.supports(summary):
+                entry = tuner._entry
+                current = self._read_int("vm.vfs_cache_pressure")
+                if current is not None and entry.min_value is not None and entry.max_value is not None:
+                    if mem_avail < 0.20 and current < entry.max_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_vfs_cache_pressure",
+                            action_id="increase_cache_pressure",
+                            target="vm.vfs_cache_pressure",
+                            value=min(int(entry.max_value), current + int(entry.step)),
+                            reason="Low memory; reclaim inode/dentry cache more aggressively.",
+                            priority=48,
+                            metadata={"current": current, "mem_available_ratio": mem_avail},
+                        ))
+                    elif mem_avail > 0.50 and current > entry.min_value:
+                        actions.append(TunerAction(
+                            tuner_id="sysctl_vm_vfs_cache_pressure",
+                            action_id="decrease_cache_pressure",
+                            target="vm.vfs_cache_pressure",
+                            value=max(int(entry.min_value), current - int(entry.step)),
+                            reason="Healthy memory; keep inode/dentry cache warmer.",
+                            priority=38,
+                            metadata={"current": current, "mem_available_ratio": mem_avail},
+                        ))
+
         return actions
 
 

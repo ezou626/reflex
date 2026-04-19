@@ -82,4 +82,6 @@ if [ $RUN_MEM -eq 1 ]; then
     launch_in_cgroup ./build/tester_mem /sys/fs/cgroup/reflex_mem
 fi
 
-python3 daemon/main.py --cgroup-ids "${CGROUP_IDS[@]}"
+VENV_PYTHON="$(dirname "$0")/.venv/bin/python3"
+PYTHON="${VENV_PYTHON:-python3}"
+sudo "$PYTHON" daemon/main.py --cgroup-ids "${CGROUP_IDS[@]}"
