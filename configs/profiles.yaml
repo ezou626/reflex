@@ -15,7 +15,23 @@ profiles:
     command: stress-ng --cpu 1 --vm 1 --vm-bytes 40% --timeout 30 --metrics-brief
     duration_sec: 30
     warmup_sec: 5
-  wsl_safe:
+  sched_churn:
+    command: stress-ng --fork 4 --switch 4 --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
+  memory_io_mixed:
+    command: stress-ng --cpu 1 --vm 1 --vm-bytes 35% --hdd 2 --hdd-bytes 128M --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
+  syscall_stress:
+    command: stress-ng --syscall 2 --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5
+  wsl_quick:
     command: stress-ng --cpu 1 --vm 1 --vm-bytes 20% --timeout 15 --metrics-brief
     duration_sec: 15
     warmup_sec: 3
+  wsl_safe:
+    command: stress-ng --cpu 1 --vm 1 --vm-bytes 20% --timeout 30 --metrics-brief
+    duration_sec: 30
+    warmup_sec: 5

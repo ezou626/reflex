@@ -38,9 +38,11 @@ from control import (
     CompositeProposalController,
     ExternalJsonlProposalController,
     HeuristicProposalController,
+    NoopProposalController,
 )
 from decision_engine import DecisionEngine
 from history import WindowHistory
+import host_metrics
 from rollback import RollbackManager, frames_to_rollback
 from tuners.base import AppliedAction
 from tuners.registry import TunerRegistry
@@ -118,20 +120,6 @@ def _default_run_dir(run_id: str) -> Path:
 
 def _decode_comm(raw: Any) -> str:
     return raw.decode("utf-8", errors="replace").rstrip("\0")
-
-
-def _read_first_token(path: str, default: float | None = None) -> float | None:
-    try:
-        text = Path(path).read_text(encoding="utf-8").strip()
-    except OSError:
-        return default
-    if not text:
-        return default
-    token = text.split()[0]
-    try:
-        return float(token)
-    except ValueError:
-        return default
 
 
 def _parse_proc_stat() -> tuple[int, int, int] | None:
@@ -227,9 +215,13 @@ class ProcSampleState:
     prev_idle_jiffies: int | None = None
     prev_ctxt: int | None = None
     prev_sample_ts: float | None = None
+    prev_vmstat: dict[str, int] | None = None
+    prev_disk_read_sectors: int | None = None
+    prev_disk_write_sectors: int | None = None
 
     def sample(self, now_ts: float) -> dict[str, Any]:
         result: dict[str, Any] = {}
+        rate_ref_ts = self.prev_sample_ts
         stat = _parse_proc_stat()
         if stat is not None:
             total, idle, ctxt = stat
@@ -262,10 +254,45 @@ class ProcSampleState:
             )
         if "Dirty" in mem:
             result["host_dirty_kb"] = mem["Dirty"]
+        mem_extra = host_metrics.parse_meminfo_extra()
+        result.update(host_metrics.meminfo_extra_to_host_features(mem_extra, mem_total))
 
-        la = _read_first_token("/proc/loadavg")
-        if la is not None:
-            result["host_loadavg_1m"] = round(la, 4)
+        pr, pb = host_metrics.parse_proc_stat_task_counts()
+        if pr is not None:
+            result["host_procs_running"] = pr
+        if pb is not None:
+            result["host_procs_blocked"] = pb
+
+        result.update(host_metrics.parse_loadavg())
+
+        pc = host_metrics.count_processes()
+        if pc is not None:
+            result["host_process_count"] = pc
+
+        cur_vm = host_metrics.read_vmstat_counters()
+        if cur_vm and rate_ref_ts is not None and self.prev_vmstat is not None:
+            dt = max(now_ts - rate_ref_ts, 1e-6)
+            result.update(host_metrics.vmstat_per_sec(self.prev_vmstat, cur_vm, dt))
+        if cur_vm:
+            self.prev_vmstat = cur_vm
+
+        cur_dr, cur_dw = host_metrics.read_diskstats_sector_totals()
+        if (
+            rate_ref_ts is not None
+            and self.prev_disk_read_sectors is not None
+            and self.prev_disk_write_sectors is not None
+        ):
+            dt = max(now_ts - rate_ref_ts, 1e-6)
+            rates, _ = host_metrics.disk_sectors_per_sec(
+                self.prev_disk_read_sectors,
+                self.prev_disk_write_sectors,
+                cur_dr,
+                cur_dw,
+                dt,
+            )
+            result.update(rates)
+        self.prev_disk_read_sectors = cur_dr
+        self.prev_disk_write_sectors = cur_dw
 
         for resource in ("cpu", "memory", "io"):
             result.update(_parse_psi(resource))
@@ -447,6 +474,12 @@ def main() -> int:
         help="Emit decisions without changing kernel tunables.",
     )
     parser.add_argument(
+        "--controller-mode",
+        type=str,
+        default="heuristic",
+        help="Proposal controller mode for decision candidates (e.g. heuristic, noop).",
+    )
+    parser.add_argument(
         "--external-proposals",
         type=Path,
         default=None,
@@ -493,7 +526,20 @@ def main() -> int:
         run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
     )
     stack.load()
-    proposal_controllers: list = [HeuristicProposalController()]
+    controller_factories = {
+        "heuristic": HeuristicProposalController,
+        "noop": NoopProposalController,
+    }
+    proposal_controllers: list = []
+    controller_mode = args.controller_mode.strip().lower()
+    if controller_mode in controller_factories:
+        proposal_controllers.append(controller_factories[controller_mode]())
+    else:
+        available = ", ".join(sorted(controller_factories))
+        raise SystemExit(
+            f"Unknown --controller-mode '{args.controller_mode}'. Available: {available}"
+        )
+
     if args.external_proposals is not None:
         proposal_controllers.append(
             ExternalJsonlProposalController(args.external_proposals)

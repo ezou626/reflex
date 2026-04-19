@@ -41,6 +41,20 @@ class CompositeProposalController(ProposalController):
         return out
 
 
+class NoopProposalController(ProposalController):
+    """Controller that intentionally emits no proposals."""
+
+    def propose(
+        self,
+        summary: dict[str, Any],
+        history: list[dict[str, Any]],
+        *,
+        registry: TunerRegistry,
+    ) -> list[TunerAction]:
+        del summary, history, registry
+        return []
+
+
 class HeuristicProposalController(ProposalController):
     """Hand-tuned heuristics (e.g. swappiness vs memory pressure)."""
 

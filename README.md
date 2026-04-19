@@ -7,6 +7,7 @@
   - `scripts/setup_dev_env.sh`
 
 - **Key directories**
+  - `TODO.md` – backlog for **extra host / benchmark metrics** (implemented vs planned).
   - `ebpf/` – eBPF programs (e.g. MVP ring buffer)
   - `daemon/` – userspace daemon (`main.py` for the MVP collector)
   - `scripts/` – `setup_dev_env.sh`, `test_mvp_qemu.sh`, etc.
@@ -49,11 +50,25 @@
     - `--external-proposals` optional JSONL of actions from an external or ML controller
     - `--dry-run` for baseline collection without applying tunables
     - `uv sync --extra dev && uv run pytest` runs catalog and sysctl helper tests
-  - Benchmark + profile loop:
-    - `bash benchmarks/run_profile.sh cpu_bound baseline`
-    - `bash benchmarks/run_profile.sh cpu_bound tuned`
-    - `python benchmarks/scorecard.py data/runs/<baseline>/summary.jsonl data/runs/<tuned>/summary.jsonl`
-    - WSL-safe profile: `bash benchmarks/run_profile.sh wsl_safe baseline`
+  - Benchmark + profile loop (3-way MVP comparison):
+    - `bash benchmarks/run_profile.sh cpu_bound heuristic`
+    - `bash benchmarks/run_profile.sh cpu_bound noop`
+    - `bash benchmarks/run_profile.sh cpu_bound workload_only`
+    - Profiles live in [`configs/profiles.yaml`](configs/profiles.yaml): each entry has `command`, `duration_sec`, and `warmup_sec`. The shell script and matrix runner use the same **idle-before / warmup / main workload / idle-after** schedule (override idle with `IDLE_BEFORE_SEC` / `IDLE_AFTER_SEC` for `run_profile.sh`).
+    - **Interpreting comparisons:** heuristic vs noop reflects **controller behavior** (including sysctl changes in heuristic mode), not a pure apples-to-apples host baseline. Daemon or heuristic vs **workload_only** mixes **eBPF + daemon overhead** with any policy effects. Prefer longer profiles (e.g. `wsl_safe` at 30s) for stable loadavg; use `wsl_quick` (15s) only for smoke tests.
+    - Scorecard (means over `summary.jsonl` windows, pairwise on overlapping keys):
+      - `python benchmarks/scorecard_three_way.py [--filter-workload-window] [--drop-first N] [--drop-last M] [--include-psi-totals] data/runs/<heuristic>/summary.jsonl data/runs/<noop>/summary.jsonl data/runs/<workload_only>/summary.jsonl`
+      - By default, keys ending in `_total` (cumulative PSI counters) are **omitted** from pairwise metrics; pass `--include-psi-totals` to keep them.
+      - With `--filter-workload-window`, each run’s `run_metadata.json` (next to `summary.jsonl`) must include `workload_started_unix_s` and `workload_ended_unix_s`; only windows overlapping that interval are averaged (reduces idle tail dilution). Matrix runs write this metadata automatically.
+    - WSL-oriented profiles: `bash benchmarks/run_profile.sh wsl_safe noop` (30s workload) or `bash benchmarks/run_profile.sh wsl_quick noop` (15s).
+    - Richer stress-ng profiles for scheduler / syscall / mixed I/O signal: `sched_churn`, `memory_io_mixed`, `syscall_stress` (see `configs/profiles.yaml`).
+  - Python-only matrix helper (works with any daemon controller mode):
+    - `python benchmarks/run_controller_matrix.py --profile cpu_bound --controller-modes heuristic,noop --include-workload-only`
+    - `python benchmarks/run_controller_matrix.py --profile cpu_bound --controller-modes noop --no-workload-only`
+    - Optional: `--idle-before-sec`, `--idle-after-sec`, `--warmup-sec`, `--scorecard-drop-first`, `--scorecard-drop-last`, `--scorecard-no-workload-window`, `--scorecard-include-psi-totals`
+    - **`--trials K`:** repeat the full matrix `K` times (fresh run IDs per trial). Each trial writes `scorecard_three_way_trial_<i>.json` plus **`scorecard_three_way_trial_<i>.summary.txt`** (compact table). For `K>1`, also writes `data/runs/<prefix>-<profile>-batch-<ts>/index.json`, `scorecard_three_way_median.json`, and **`scorecard_three_way_median.summary.txt`**. Stdout prints the **compact table**, not the full JSON.
+    - Re-aggregate existing scorecards: `python benchmarks/scorecard_trials_aggregate.py -o /tmp/med.json trial0.json trial1.json` (writes `/tmp/med.json` + `/tmp/med.summary.txt`; stdout is compact unless you pass `--json-stdout`).
+    - Render any scorecard JSON: `python benchmarks/scorecard_compact.py data/runs/.../scorecard_three_way.json` (writes `.summary.txt` beside it and prints the table).
   - Per-run report generation:
     - `python benchmarks/report_run.py data/runs/<run-id>`
     - `python benchmarks/report_run.py data/runs/<run-id> --format json --output data/runs/<run-id>/report.json`
