@@ -89,18 +89,61 @@ _FEATURE_MAP: list[tuple[str, float]] = [
 # Daemon integration
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Cgroup helpers — mirror what run.sh does for the always-on daemon
+# ---------------------------------------------------------------------------
+
+def _create_stressor_cgroup() -> tuple[Path | None, int | None]:
+    """
+    Create a dedicated cgroup for the stressor process.
+    Returns (cgroup_dir, cgroup_id) or (None, None) on failure.
+    The cgroup ID (inode number of the cgroup dir) is what the eBPF
+    whitelist uses to filter events to only this workload.
+    """
+    cgroup_dir = Path(f"/sys/fs/cgroup/reflex_tune_{os.getpid()}")
+    try:
+        cgroup_dir.mkdir(exist_ok=True)
+        cgid = cgroup_dir.stat().st_ino
+        return cgroup_dir, cgid
+    except OSError as e:
+        print(f"  [warn] cgroup creation failed ({e}) — eBPF will track all processes")
+        return None, None
+
+
+def _move_to_cgroup(pid: int, cgroup_dir: Path) -> None:
+    try:
+        (cgroup_dir / "cgroup.procs").write_text(str(pid), encoding="utf-8")
+    except OSError as e:
+        print(f"  [warn] could not move stressor to cgroup: {e}")
+
+
+def _cleanup_cgroup(cgroup_dir: Path | None) -> None:
+    if cgroup_dir is None or not cgroup_dir.exists():
+        return
+    try:
+        cgroup_dir.rmdir()
+    except OSError:
+        pass
+
+
 class DaemonContext:
     """
     Manages the eBPF daemon subprocess for one measurement window.
 
-    Starts the daemon with a fresh summary output file so we can read
-    exactly the windows produced during this experiment.  The daemon is
-    passed --dry-run so it never changes any sysctl itself.
+    Starts the daemon with a fresh summary output file and the stressor's
+    cgroup ID so the eBPF whitelist only tracks that workload — mirroring
+    exactly what run.sh does for the always-on daemon.
     """
 
-    def __init__(self, summary_path: Path, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        summary_path: Path,
+        dry_run: bool = False,
+        cgroup_id: int | None = None,
+    ) -> None:
         self.summary_path = summary_path
         self.dry_run = dry_run
+        self.cgroup_id = cgroup_id
         self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
@@ -114,13 +157,16 @@ class DaemonContext:
             "--window-sec", "2",
             "--proc-sample-sec", "2",
         ]
+        if self.cgroup_id is not None:
+            cmd += ["--cgroup-ids", str(self.cgroup_id)]
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             cwd=str(REPO_ROOT),
         )
-        # Let the BPF loader attach all probes before measurement begins.
+        # Let the BPF loader attach all probes and populate the cgroup
+        # whitelist before the stressor starts generating events.
         time.sleep(4)
 
     def stop(self) -> None:
@@ -504,11 +550,18 @@ class ExperimentRunner:
 
         self._apply(config)
 
+        # Create a cgroup for the stressor so eBPF only tracks its events,
+        # not everything else running on the machine.
+        cgroup_dir, cgid = (None, None) if self.dry_run else _create_stressor_cgroup()
+
         summary_file = Path(tempfile.mktemp(suffix=".jsonl", prefix="reflex_tune_"))
-        daemon = DaemonContext(summary_file, dry_run=self.dry_run)
+        daemon = DaemonContext(summary_file, dry_run=self.dry_run, cgroup_id=cgid)
         daemon.start()
 
         proc = self._start_stressor()
+        if proc is not None and cgroup_dir is not None:
+            _move_to_cgroup(proc.pid, cgroup_dir)
+
         if self.warmup > 0:
             time.sleep(self.warmup)
 
@@ -517,6 +570,7 @@ class ExperimentRunner:
 
         self._stop_stressor(proc)
         daemon.stop()
+        _cleanup_cgroup(cgroup_dir)
 
         summary = _read_avg_summary(summary_file, after_ts=measure_start)
         summary_file.unlink(missing_ok=True)
@@ -616,6 +670,10 @@ def main() -> int:
         help="Maximum number of clusters to consider (default: 6)",
     )
     parser.add_argument(
+        "--skip-cluster", action="store_true",
+        help="Skip k-means clustering at the end (use when more workloads follow)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Skip sysctl writes, stressor, and daemon; useful for testing the loop",
     )
@@ -700,11 +758,14 @@ def main() -> int:
         print(f"  {tid}: {val}")
     print(f"GP model: {runner.model_path}  ({runner.n_observations()} observations)")
 
-    cluster_and_save_library(
-        experiments_path, library_path,
-        catalog_path=args.catalog,
-        max_k=args.max_clusters,
-    )
+    if not args.skip_cluster:
+        cluster_and_save_library(
+            experiments_path, library_path,
+            catalog_path=args.catalog,
+            max_k=args.max_clusters,
+        )
+    else:
+        print("Skipping clustering (--skip-cluster set) — run cluster step after all workloads complete.")
 
     return 0
 
