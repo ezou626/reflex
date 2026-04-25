@@ -39,6 +39,8 @@ from control import (
     CompositeProposalController,
     ExternalJsonlProposalController,
     HeuristicProposalController,
+    WorkloadAwareController,
+    WorkloadClassifier,
 )
 from decision_engine import DecisionEngine
 from history import WindowHistory
@@ -499,7 +501,14 @@ def main() -> int:
         evaluate_after_windows=policy.evaluate_after_windows,
         fallback=heuristic,
     )
-    proposal_controllers: list = [bo_controller]
+    classifier = WorkloadClassifier.from_model_dir(_repo_root() / "models")
+    if classifier.is_loaded():
+        print(
+            f"Workload classifier loaded: classes={classifier.known_classes()}",
+            flush=True,
+        )
+    workload_controller = WorkloadAwareController(classifier, min_consecutive=3)
+    proposal_controllers: list = [workload_controller, bo_controller]
     if args.external_proposals is not None:
         proposal_controllers.append(
             ExternalJsonlProposalController(args.external_proposals)
@@ -624,6 +633,8 @@ def main() -> int:
                     )
                 if frames:
                     decision_engine.note_rollback()
+                for fr in frames:
+                    bo_controller.record_rollback(fr.tuner_id)
 
         print(
             f"Writing raw events to {args.output} and summaries to "

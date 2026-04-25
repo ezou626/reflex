@@ -7,9 +7,9 @@ compare_metrics:
   - host_cpu_busy_ratio
   - host_mem_available_ratio
 min_windows_before_action: 3
-cooldown_windows: 2
-evaluate_after_windows: 3
-regression_threshold: 0.05
+cooldown_windows: 3
+evaluate_after_windows: 5
+regression_threshold: 0.15
 improvement_threshold: 0.02
 decision_selection_mode: top_priority_only
 max_actions_per_tick: 1

@@ -7,6 +7,7 @@ from control.proposal_controller import (
     HeuristicProposalController,
     ProposalController,
 )
+from control.workload_classifier import WorkloadAwareController, WorkloadClassifier
 
 __all__ = [
     "BOProposalController",
@@ -14,4 +15,6 @@ __all__ = [
     "ExternalJsonlProposalController",
     "HeuristicProposalController",
     "ProposalController",
+    "WorkloadAwareController",
+    "WorkloadClassifier",
 ]

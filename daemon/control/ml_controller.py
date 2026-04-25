@@ -139,14 +139,17 @@ class BOProposalController(ProposalController):
         self,
         evaluate_after_windows: int = 3,
         xi: float = 0.01,
+        per_tuner_cooldown_windows: int = 15,
         fallback: ProposalController | None = None,
     ) -> None:
         self._evaluate_after = evaluate_after_windows
         self._xi = xi
+        self._per_tuner_cooldown = per_tuner_cooldown_windows
         self._fallback = fallback
         self._surrogates: dict[str, _TunerBO] = {}
         self._pending: list[_PendingObs] = []
         self._window_count = 0
+        self._tuner_cooldown_until: dict[str, int] = {}  # tuner_id -> window_count
 
     def _get_surrogate(self, tuner_id: str, registry: TunerRegistry) -> _TunerBO | None:
         if tuner_id in self._surrogates:
@@ -195,6 +198,8 @@ class BOProposalController(ProposalController):
         for tuner_id in sorted(registry.catalog_entry_ids()):
             if not registry.is_enabled(tuner_id):
                 continue
+            if self._window_count < self._tuner_cooldown_until.get(tuner_id, 0):
+                continue
             surrogate = self._get_surrogate(tuner_id, registry)
             if surrogate is None or surrogate.n_observations < _TunerBO.MIN_FIT_SAMPLES:
                 continue
@@ -231,10 +236,12 @@ class BOProposalController(ProposalController):
             ))
             bo_covered.add(tuner_id)
 
-        # heuristic fallback for cold-start tuners
+        # heuristic fallback for cold-start tuners not on per-tuner cooldown
         if self._fallback is not None:
             for a in self._fallback.propose(summary, history, registry=registry):
                 if a.tuner_id not in bo_covered:
+                    if self._window_count < self._tuner_cooldown_until.get(a.tuner_id, 0):
+                        continue
                     actions.append(a)
 
         return actions
@@ -256,3 +263,15 @@ class BOProposalController(ProposalController):
             state_vec=extract_state_vec(summary),
             summary_before=summary,
         ))
+
+    def record_rollback(self, tuner_id: str) -> None:
+        """
+        Cancel pending observations for a rolled-back tuner and apply a
+        per-tuner cooldown so other tuners get exploration turns.
+
+        Without this, the GP would train on outcomes measured after the
+        rollback has already fired — i.e. the system returning to baseline —
+        which gives completely confounded reward signal.
+        """
+        self._pending = [o for o in self._pending if o.tuner_id != tuner_id]
+        self._tuner_cooldown_until[tuner_id] = self._window_count + self._per_tuner_cooldown

@@ -1,0 +1,34 @@
+{
+  "cluster_0": {
+    "centroid": [
+      0.09223735580240772,
+      0.07247376120804994,
+      0.00040868928533690255,
+      0.04580241978091649
+    ],
+    "best_config": {
+      "sysctl_vm_swappiness": 47,
+      "sysctl_vm_dirty_ratio": 17,
+      "sysctl_vm_vfs_cache_pressure": 71
+    },
+    "best_reward": 0.014938,
+    "n_observations": 29,
+    "dominant_stressor": "./build/tester_mem 80 5"
+  },
+  "cluster_1": {
+    "centroid": [
+      0.029835711785158495,
+      0.07412487233948883,
+      0.0003254217826487273,
+      0.02691625792970668
+    ],
+    "best_config": {
+      "sysctl_vm_swappiness": 50,
+      "sysctl_vm_dirty_ratio": 14,
+      "sysctl_vm_vfs_cache_pressure": 75
+    },
+    "best_reward": 0.028136,
+    "n_observations": 9,
+    "dominant_stressor": "./build/tester_mem 80 5 --dry-run --experiments 5 --duration 2 --warmup 0 --settle 0"
+  }
+}
