@@ -26,7 +26,50 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.dirty_background_ratio
     kind: int
-    enabled: false
+    enabled: true
+    min_value: 2
+    max_value: 25
+    step: 2
+  - id: sysctl_vm_watermark_scale_factor
+    category: vm
+    description: How aggressively kswapd wakes to reclaim memory before hitting watermarks
+    scope: runtime_sysctl
+    sysctl: vm.watermark_scale_factor
+    kind: int
+    enabled: true
+    min_value: 10
+    max_value: 200
+    step: 10
+  - id: sysctl_vm_min_free_kbytes
+    category: vm
+    description: Minimum free memory the kernel keeps in reserve to avoid OOM
+    scope: runtime_sysctl
+    sysctl: vm.min_free_kbytes
+    kind: int
+    enabled: true
+    min_value: 16384
+    max_value: 131072
+    step: 8192
+  - id: sysctl_kernel_sched_cfs_bandwidth_slice_us
+    category: cpu
+    description: CFS scheduling time-slice length; smaller reduces latency, larger improves throughput
+    scope: runtime_sysctl
+    sysctl: kernel.sched_cfs_bandwidth_slice_us
+    kind: int
+    enabled: true
+    min_value: 1000
+    max_value: 20000
+    step: 1000
+  - id: sysctl_kernel_sched_autogroup_enabled
+    category: cpu
+    description: Group tasks by session for fairer scheduling; off favours batch throughput
+    scope: runtime_sysctl
+    sysctl: kernel.sched_autogroup_enabled
+    kind: int
+    enabled: true
+    min_value: 0
+    max_value: 1
+    step: 1
   - id: sysctl_vm_vfs_cache_pressure
     category: vm
     description: Tendency to reclaim inode/dentry cache vs swap

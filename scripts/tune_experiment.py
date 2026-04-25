@@ -2,8 +2,8 @@
 """
 Offline controlled-experiment kernel tuner with unsupervised workload discovery.
 
-Each experiment: apply a full config vector, fire a stressor, measure /proc
-metrics for a fixed window, tell the GP, propose next config via EI.
+Each experiment: apply a full config vector, fire a stressor, run the eBPF
+daemon for a measurement window, tell the GP, propose next config via EI.
 
 Workload classes are discovered automatically via k-means over the collected
 feature vectors — no labeling required. Run with different stressors across
@@ -37,6 +37,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -57,102 +58,167 @@ from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 JOINT_TUNER_IDS = [
+    # memory reclaim
     "sysctl_vm_swappiness",
     "sysctl_vm_dirty_ratio",
+    "sysctl_vm_dirty_background_ratio",
     "sysctl_vm_vfs_cache_pressure",
+    "sysctl_vm_watermark_scale_factor",
+    "sysctl_vm_min_free_kbytes",
+    # cpu scheduler
+    "sysctl_kernel_sched_cfs_bandwidth_slice_us",
+    "sysctl_kernel_sched_autogroup_enabled",
 ]
 
-# Feature space for clustering (must match workload_classifier.py _FEATURE_MAP).
-# Each entry: (host_features key, normalization denominator)
-_FEATURE_MAP = [
-    ("cpu_busy",             1.0),
-    ("mem_available_ratio",  1.0),
-    ("dirty_kb",             200_000.0),
-    ("loadavg",              10.0),
+# Feature space for clustering. Must stay in sync with
+# _FEATURE_MAP in daemon/control/workload_classifier.py.
+# Keys are looked up from daemon summary["metrics"] or summary["host_features"].
+_FEATURE_MAP: list[tuple[str, float]] = [
+    ("rq_latency_p95_us",           10_000.0),
+    ("context_switch_rate_per_sec", 100_000.0),
+    ("syscall_error_rate",          1.0),
+    ("host_cpu_busy_ratio",         1.0),
+    ("host_mem_available_ratio",    1.0),
+    ("host_dirty_kb",               200_000.0),
+    ("direct_reclaim_rate_per_sec", 100.0),
+    ("blk_latency_p95_us",          50_000.0),
 ]
 
 
 # ---------------------------------------------------------------------------
-# /proc metric helpers (no eBPF required)
+# Daemon integration
 # ---------------------------------------------------------------------------
 
-def _proc_stat() -> tuple[int, int] | None:
-    try:
-        for line in Path("/proc/stat").read_text().splitlines():
-            if line.startswith("cpu "):
-                parts = [int(x) for x in line.split()[1:]]
-                return sum(parts), parts[3]
-    except OSError:
-        pass
-    return None
+class DaemonContext:
+    """
+    Manages the eBPF daemon subprocess for one measurement window.
+
+    Starts the daemon with a fresh summary output file so we can read
+    exactly the windows produced during this experiment.  The daemon is
+    passed --dry-run so it never changes any sysctl itself.
+    """
+
+    def __init__(self, summary_path: Path, dry_run: bool = False) -> None:
+        self.summary_path = summary_path
+        self.dry_run = dry_run
+        self._proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        if self.dry_run:
+            return
+        daemon_main = REPO_ROOT / "daemon" / "main.py"
+        cmd = [
+            sys.executable, str(daemon_main),
+            "--summary-output", str(self.summary_path),
+            "--dry-run",          # daemon must not apply sysctl changes
+            "--window-sec", "2",
+            "--proc-sample-sec", "2",
+        ]
+        self._proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(REPO_ROOT),
+        )
+        # Let the BPF loader attach all probes before measurement begins.
+        time.sleep(4)
+
+    def stop(self) -> None:
+        if self._proc is None:
+            return
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait()
+        self._proc = None
+
+    def __enter__(self) -> DaemonContext:
+        self.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.stop()
 
 
-def _meminfo() -> dict[str, int]:
-    want = {"MemTotal", "MemAvailable", "Dirty"}
-    out: dict[str, int] = {}
-    try:
-        for line in Path("/proc/meminfo").read_text().splitlines():
-            if ":" not in line:
+def _read_avg_summary(summary_path: Path, after_ts: float) -> dict[str, Any]:
+    """
+    Read daemon window summaries from summary_path, keeping only windows
+    whose end timestamp is >= after_ts (i.e. within the measurement window).
+    Returns a single merged dict with averaged "metrics" and "host_features".
+    """
+    summaries: list[dict] = []
+    if summary_path.is_file():
+        for line in summary_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
                 continue
-            k, rest = line.split(":", 1)
-            if k in want:
-                out[k] = int(rest.strip().split()[0])
-    except OSError:
-        pass
-    return out
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("record_type") != "window_summary":
+                continue
+            if float(obj.get("window_end_unix_s", 0)) >= after_ts:
+                summaries.append(obj)
 
+    if not summaries:
+        return {"metrics": {}, "host_features": {}}
 
-def _loadavg() -> float:
-    try:
-        return float(Path("/proc/loadavg").read_text().split()[0])
-    except OSError:
-        return 0.0
+    # Collect numeric keys from each sub-dict and average across windows.
+    metric_keys: set[str] = set()
+    host_keys: set[str] = set()
+    for s in summaries:
+        metric_keys.update(
+            k for k, v in s.get("metrics", {}).items() if isinstance(v, (int, float))
+        )
+        host_keys.update(
+            k for k, v in s.get("host_features", {}).items() if isinstance(v, (int, float))
+        )
 
+    def _avg(vals: list) -> float:
+        clean = [float(v) for v in vals if isinstance(v, (int, float))]
+        return float(np.mean(clean)) if clean else 0.0
 
-def measure_window(duration_s: float, sample_hz: float = 2.0) -> dict[str, float]:
-    """Poll /proc at sample_hz for duration_s, return time-averaged metrics."""
-    interval = 1.0 / sample_hz
-    deadline = time.monotonic() + duration_s
-    prev_stat = _proc_stat()
-    buckets: dict[str, list[float]] = {
-        "cpu_busy": [], "mem_available_ratio": [], "dirty_kb": [], "loadavg": []
+    avg_metrics = {
+        k: _avg([s.get("metrics", {}).get(k) for s in summaries])
+        for k in metric_keys
     }
-
-    while True:
-        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
-        if sleep_for <= 0:
-            break
-        time.sleep(sleep_for)
-
-        now_stat = _proc_stat()
-        mem = _meminfo()
-
-        if now_stat and prev_stat:
-            d_total = max(now_stat[0] - prev_stat[0], 1)
-            d_idle  = max(now_stat[1] - prev_stat[1], 0)
-            buckets["cpu_busy"].append(max(0.0, min(1.0, 1.0 - d_idle / d_total)))
-        prev_stat = now_stat
-
-        mem_total = mem.get("MemTotal", 0)
-        if mem_total > 0:
-            buckets["mem_available_ratio"].append(mem.get("MemAvailable", 0) / mem_total)
-        buckets["dirty_kb"].append(float(mem.get("Dirty", 0)))
-        buckets["loadavg"].append(_loadavg())
-
-    return {k: float(np.mean(v)) if v else 0.0 for k, v in buckets.items()}
+    avg_host = {
+        k: _avg([s.get("host_features", {}).get(k) for s in summaries])
+        for k in host_keys
+    }
+    return {"metrics": avg_metrics, "host_features": avg_host}
 
 
-def metrics_to_feature_vec(metrics: dict[str, float]) -> list[float]:
-    return [min(metrics.get(k, 0.0) / norm, 1.0) for k, norm in _FEATURE_MAP]
+def _get_val(summary: dict[str, Any], key: str) -> float:
+    """Look up a metric from either sub-dict of a daemon summary."""
+    v = summary.get("metrics", {}).get(key)
+    if v is None:
+        v = summary.get("host_features", {}).get(key, 0.0)
+    return float(v) if v is not None else 0.0
 
 
-def compute_absolute_reward(metrics: dict[str, float]) -> float:
-    """Scalar reward for one measurement window. Higher is better."""
-    return (
-        0.45 * metrics.get("mem_available_ratio", 0.0)
-        - 0.25 * metrics.get("cpu_busy", 1.0)
-        - 0.20 * min(metrics.get("dirty_kb", 0.0) / 200_000.0, 1.0)
-        - 0.10 * min(metrics.get("loadavg", 0.0) / 10.0, 1.0)
+def metrics_to_feature_vec(summary: dict[str, Any]) -> list[float]:
+    return [min(_get_val(summary, k) / norm, 1.0) for k, norm in _FEATURE_MAP]
+
+
+def compute_absolute_reward(summary: dict[str, Any]) -> float:
+    """Scalar reward from an averaged daemon summary. Higher is better."""
+    rq_lat  = min(_get_val(summary, "rq_latency_p95_us")           / 10_000.0, 1.0)
+    dr_rate = min(_get_val(summary, "direct_reclaim_rate_per_sec") / 100.0,    1.0)
+    cpu     = min(_get_val(summary, "host_cpu_busy_ratio"),                     1.0)
+    dirty   = min(_get_val(summary, "host_dirty_kb")               / 200_000.0, 1.0)
+    mem_avail = _get_val(summary, "host_mem_available_ratio")
+
+    return round(
+        0.35 * mem_avail
+        - 0.30 * rq_lat
+        - 0.20 * dr_rate
+        - 0.10 * cpu
+        - 0.05 * dirty,
+        6,
     )
 
 
@@ -169,8 +235,8 @@ def _fit_cluster_gp(
     config at the predicted maximum.  This generalises beyond the observed
     points so the deployed config can be better than any single experiment.
 
-    If the cluster has fewer points than MIN_FIT_SAMPLES we fall back to
-    argmax over the raw observations (GP would overfit anyway).
+    If the cluster has fewer points than MIN_FIT we fall back to argmax
+    over the raw observations (GP would overfit anyway).
     """
     MIN_FIT = 5
     configs  = [list(e["config"].values()) for e in cluster_exps]
@@ -190,17 +256,14 @@ def _fit_cluster_gp(
     for cfg, r in zip(configs, rewards):
         opt.tell(cfg, -r)     # skopt minimises → negate
 
-    # Predict over a dense grid of candidate configs and return the argmax.
-    # Using opt.ask() here would give the next *exploration* point, not the
-    # predicted optimum.  We want exploitation: the config with highest μ.
+    # Random search over 2000 candidates from the full space (grid search is
+    # intractable for 8+ dimensions), pick the config with the highest GP mean.
     gp = opt.models[-1]
-    dims = [list(range(int(d.low), int(d.high) + 1, max(1, (int(d.high) - int(d.low)) // 20)))
-            for d in opt.space.dimensions]
-    grid = [[a, b, c] for a in dims[0] for b in dims[1] for c in dims[2]]
-    X_t  = opt.space.transform(grid)
+    candidates = opt.space.rvs(n_samples=2000, random_state=42)
+    X_t = opt.space.transform(candidates)
     mean_neg, _ = gp.predict(X_t, return_std=True)
     best_i = int(np.argmin(mean_neg))   # minimising negated reward
-    return grid[best_i]
+    return list(candidates[best_i])
 
 
 def cluster_and_save_library(
@@ -344,7 +407,6 @@ class ExperimentRunner:
         self.duration      = duration_s
         self.warmup        = warmup_s
         self.dry_run       = dry_run
-        self._all_metrics: list[dict[str, float]] = []
 
         key = _stressor_key(stressor_cmd)
         self.model_path = model_dir / f"gp_{key}.pkl"
@@ -373,9 +435,21 @@ class ExperimentRunner:
         ]
 
         if self.model_path.exists():
-            self.opt: Optimizer = joblib.load(self.model_path)
-            print(f"Resumed GP model: {self.model_path} "
-                  f"({len(self.opt.Xi)} prior observations)")
+            loaded = joblib.load(self.model_path)
+            if len(loaded.space.dimensions) == len(space):
+                self.opt: Optimizer = loaded
+                print(f"Resumed GP model: {self.model_path} "
+                      f"({len(self.opt.Xi)} prior observations)")
+            else:
+                print(f"Discarding stale GP model (was {len(loaded.space.dimensions)}-dim, "
+                      f"now {len(space)}-dim) — starting fresh.")
+                self.opt = Optimizer(
+                    dimensions=space,
+                    base_estimator="GP",
+                    acq_func="EI",
+                    n_initial_points=6,
+                    random_state=42,
+                )
         else:
             self.opt = Optimizer(
                 dimensions=space,
@@ -429,25 +503,36 @@ class ExperimentRunner:
         print(f"  config={label} ...", end="", flush=True)
 
         self._apply(config)
+
+        summary_file = Path(tempfile.mktemp(suffix=".jsonl", prefix="reflex_tune_"))
+        daemon = DaemonContext(summary_file, dry_run=self.dry_run)
+        daemon.start()
+
         proc = self._start_stressor()
         if self.warmup > 0:
             time.sleep(self.warmup)
 
-        metrics = measure_window(self.duration)
+        measure_start = time.time()
+        time.sleep(self.duration)
+
         self._stop_stressor(proc)
+        daemon.stop()
+
+        summary = _read_avg_summary(summary_file, after_ts=measure_start)
+        summary_file.unlink(missing_ok=True)
+
         self.restore_baseline()
 
-        reward = compute_absolute_reward(metrics)
+        reward = compute_absolute_reward(summary)
         self.opt.tell(config, -reward)
-        self._all_metrics.append(metrics)
 
         if reward > self.best_reward:
             self.best_reward = reward
             self.best_config = [int(v) for v in config]
 
-        _print_result(reward, metrics)
+        _print_result(reward, summary)
         return {
-            "feature_vec": metrics_to_feature_vec(metrics),
+            "feature_vec": metrics_to_feature_vec(summary),
             "config": {e.id: int(v) for e, v in zip(self.entries, config)},
             "reward": reward,
             "stressor": " ".join(self.stressor_cmd),
@@ -470,14 +555,20 @@ class ExperimentRunner:
 # Output helpers
 # ---------------------------------------------------------------------------
 
-def _print_result(reward: float, metrics: dict[str, float]) -> None:
+def _print_result(reward: float, summary: dict[str, Any]) -> None:
     parts = [f"reward={reward:+.4f}"]
-    if "mem_available_ratio" in metrics:
-        parts.append(f"mem_avail={metrics['mem_available_ratio']:.2%}")
-    if "cpu_busy" in metrics:
-        parts.append(f"cpu={metrics['cpu_busy']:.2%}")
-    if "dirty_kb" in metrics:
-        parts.append(f"dirty={metrics['dirty_kb']:.0f}kb")
+    mem = _get_val(summary, "host_mem_available_ratio")
+    if mem:
+        parts.append(f"mem_avail={mem:.2%}")
+    rq = _get_val(summary, "rq_latency_p95_us")
+    if rq:
+        parts.append(f"rq_p95={rq:.0f}us")
+    dr = _get_val(summary, "direct_reclaim_rate_per_sec")
+    if dr:
+        parts.append(f"dr_rate={dr:.1f}/s")
+    blk = _get_val(summary, "blk_latency_p95_us")
+    if blk:
+        parts.append(f"blk_p95={blk:.0f}us")
     print("  " + "  ".join(parts))
 
 
@@ -526,7 +617,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Skip sysctl writes and stressor; useful for testing the loop",
+        help="Skip sysctl writes, stressor, and daemon; useful for testing the loop",
     )
     args = parser.parse_args()
 

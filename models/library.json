@@ -1,34 +1,44 @@
 {
   "cluster_0": {
     "centroid": [
-      0.09223735580240772,
-      0.07247376120804994,
-      0.00040868928533690255,
-      0.04580241978091649
+      0.08555138289953623,
+      0.8760849867192949,
+      0.0012699999999999999,
+      0.016
     ],
     "best_config": {
-      "sysctl_vm_swappiness": 47,
-      "sysctl_vm_dirty_ratio": 17,
-      "sysctl_vm_vfs_cache_pressure": 71
+      "sysctl_vm_swappiness": 59,
+      "sysctl_vm_dirty_ratio": 5,
+      "sysctl_vm_dirty_background_ratio": 3,
+      "sysctl_vm_vfs_cache_pressure": 129,
+      "sysctl_vm_watermark_scale_factor": 86,
+      "sysctl_vm_min_free_kbytes": 21736,
+      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 19501,
+      "sysctl_kernel_sched_autogroup_enabled": 0
     },
-    "best_reward": 0.014938,
-    "n_observations": 29,
+    "best_reward": 0.371078,
+    "n_observations": 2,
     "dominant_stressor": "./build/tester_mem 80 5"
   },
   "cluster_1": {
     "centroid": [
-      0.029835711785158495,
-      0.07412487233948883,
-      0.0003254217826487273,
-      0.02691625792970668
+      0.07752902155887231,
+      0.8762750958073907,
+      0.00112,
+      0.017
     ],
     "best_config": {
-      "sysctl_vm_swappiness": 50,
-      "sysctl_vm_dirty_ratio": 14,
-      "sysctl_vm_vfs_cache_pressure": 75
+      "sysctl_vm_swappiness": 74,
+      "sysctl_vm_dirty_ratio": 11,
+      "sysctl_vm_dirty_background_ratio": 20,
+      "sysctl_vm_vfs_cache_pressure": 140,
+      "sysctl_vm_watermark_scale_factor": 95,
+      "sysctl_vm_min_free_kbytes": 27850,
+      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 9726,
+      "sysctl_kernel_sched_autogroup_enabled": 0
     },
-    "best_reward": 0.028136,
-    "n_observations": 9,
-    "dominant_stressor": "./build/tester_mem 80 5 --dry-run --experiments 5 --duration 2 --warmup 0 --settle 0"
+    "best_reward": 0.373018,
+    "n_observations": 1,
+    "dominant_stressor": "./build/tester_mem 80 5"
   }
 }

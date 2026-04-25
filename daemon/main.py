@@ -63,20 +63,24 @@ class _Ev:
          self.ts_ns, self.value_i32, self.value_u32, self.comm) = fields
 
 
-EVENT_EXEC = 1
-EVENT_FORK = 2
-EVENT_EXIT = 3
-EVENT_SCHED_SWITCH = 4
-EVENT_SYSCALL_EXIT = 5
-EVENT_RQ_LATENCY = 6
+EVENT_EXEC           = 1
+EVENT_FORK           = 2
+EVENT_EXIT           = 3
+EVENT_SCHED_SWITCH   = 4
+EVENT_SYSCALL_EXIT   = 5
+EVENT_RQ_LATENCY     = 6
+EVENT_DIRECT_RECLAIM = 7
+EVENT_BLK_LATENCY    = 8
 
 EVENT_NAME = {
-    EVENT_EXEC: "exec",
-    EVENT_FORK: "fork",
-    EVENT_EXIT: "exit",
-    EVENT_SCHED_SWITCH: "sched_switch",
-    EVENT_SYSCALL_EXIT: "sys_exit",
-    EVENT_RQ_LATENCY: "rq_latency",
+    EVENT_EXEC:           "exec",
+    EVENT_FORK:           "fork",
+    EVENT_EXIT:           "exit",
+    EVENT_SCHED_SWITCH:   "sched_switch",
+    EVENT_SYSCALL_EXIT:   "sys_exit",
+    EVENT_RQ_LATENCY:     "rq_latency",
+    EVENT_DIRECT_RECLAIM: "direct_reclaim",
+    EVENT_BLK_LATENCY:    "blk_latency",
 }
 
 PHASE1_METRIC_CONTRACTS: dict[str, dict[str, Any]] = {
@@ -210,6 +214,8 @@ class WindowState:
     syscall_error_count: int = 0
     syscall_top_counts: dict[int, int] = field(default_factory=dict)
     rq_latency_samples_us: list[int] = field(default_factory=list)
+    direct_reclaim_samples_us: list[int] = field(default_factory=list)
+    blk_latency_samples_us: list[int] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
         name = event["event_name"]
@@ -222,6 +228,10 @@ class WindowState:
             self.syscall_top_counts[sid] = self.syscall_top_counts.get(sid, 0) + 1
         elif name == "rq_latency":
             self.rq_latency_samples_us.append(int(event["rq_latency_us"]))
+        elif name == "direct_reclaim":
+            self.direct_reclaim_samples_us.append(int(event["reclaim_lat_us"]))
+        elif name == "blk_latency":
+            self.blk_latency_samples_us.append(int(event["blk_lat_us"]))
 
 
 @dataclass
@@ -307,6 +317,10 @@ def _to_event_dict(ev: Any) -> dict[str, Any]:
         base["is_error"] = int(ev.value_i32) < 0
     elif event_type == EVENT_RQ_LATENCY:
         base["rq_latency_us"] = int(ev.value_u32)
+    elif event_type == EVENT_DIRECT_RECLAIM:
+        base["reclaim_lat_us"] = int(ev.value_u32)
+    elif event_type == EVENT_BLK_LATENCY:
+        base["blk_lat_us"] = int(ev.value_u32)
     return base
 
 
@@ -362,6 +376,13 @@ def _build_summary(
             "rq_latency_p95_us": _quantile(window.rq_latency_samples_us, 0.95),
             "rq_latency_p99_us": _quantile(window.rq_latency_samples_us, 0.99),
             "rq_latency_count": len(window.rq_latency_samples_us),
+            "direct_reclaim_rate_per_sec": round(
+                len(window.direct_reclaim_samples_us) / window_sec, 3
+            ),
+            "direct_reclaim_lat_p95_us": _quantile(window.direct_reclaim_samples_us, 0.95),
+            "blk_latency_p50_us": _quantile(window.blk_latency_samples_us, 0.50),
+            "blk_latency_p95_us": _quantile(window.blk_latency_samples_us, 0.95),
+            "blk_latency_count": len(window.blk_latency_samples_us),
         },
         "event_counts": window.event_counts,
         "top_syscalls": [

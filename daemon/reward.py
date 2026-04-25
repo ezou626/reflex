@@ -7,14 +7,17 @@ import numpy as np
 # (metric_key, normalization_denominator)
 # Keys must exist in summary["metrics"] or summary["host_features"]
 FEATURE_SPEC: list[tuple[str, float]] = [
-    ("rq_latency_p95_us",           10_000.0),
-    ("rq_latency_p99_us",           10_000.0),
-    ("context_switch_rate_per_sec", 100_000.0),
-    ("syscall_error_rate",          1.0),
-    ("host_cpu_busy_ratio",         1.0),
-    ("host_mem_available_ratio",    1.0),
-    ("host_dirty_kb",               200_000.0),
-    ("host_loadavg_1m",             10.0),
+    ("rq_latency_p95_us",            10_000.0),
+    ("rq_latency_p99_us",            10_000.0),
+    ("context_switch_rate_per_sec",  100_000.0),
+    ("syscall_error_rate",           1.0),
+    ("host_cpu_busy_ratio",          1.0),
+    ("host_mem_available_ratio",     1.0),
+    ("host_dirty_kb",                200_000.0),
+    ("host_loadavg_1m",              10.0),
+    ("direct_reclaim_rate_per_sec",  100.0),    # >10/s = severe memory pressure
+    ("direct_reclaim_lat_p95_us",    500_000.0),
+    ("blk_latency_p95_us",           50_000.0),
 ]
 
 N_FEATURES = len(FEATURE_SPEC)

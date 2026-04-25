@@ -11,27 +11,40 @@ from tuners.base import TunerAction
 from tuners.registry import TunerRegistry
 
 
-# 4-dim normalized feature space used for centroid comparison.
-# Keys map to host_features in the window summary.
-_FEATURE_MAP = [
-    ("host_cpu_busy_ratio",      1.0),
-    ("host_mem_available_ratio", 1.0),
-    ("host_dirty_kb",            200_000.0),
-    ("host_loadavg_1m",          10.0),
+# 8-dim normalized feature space for centroid comparison.
+# Keys may live in summary["metrics"] or summary["host_features"].
+# Must stay in sync with _FEATURE_MAP in scripts/tune_experiment.py.
+_FEATURE_MAP: list[tuple[str, float]] = [
+    ("rq_latency_p95_us",           10_000.0),
+    ("context_switch_rate_per_sec", 100_000.0),
+    ("syscall_error_rate",          1.0),
+    ("host_cpu_busy_ratio",         1.0),
+    ("host_mem_available_ratio",    1.0),
+    ("host_dirty_kb",               200_000.0),
+    ("direct_reclaim_rate_per_sec", 100.0),
+    ("blk_latency_p95_us",          50_000.0),
 ]
 
 
 def _summary_to_vec(summary: dict[str, Any]) -> np.ndarray:
+    metrics = summary.get("metrics", {})
     host = summary.get("host_features", {})
+
+    def _get(k: str) -> float:
+        v = metrics.get(k)
+        if v is None:
+            v = host.get(k, 0.0)
+        return float(v) if v is not None else 0.0
+
     return np.array(
-        [min(float(host.get(k, 0.0)) / norm, 1.0) for k, norm in _FEATURE_MAP],
+        [min(_get(k) / norm, 1.0) for k, norm in _FEATURE_MAP],
         dtype=np.float64,
     )
 
 
 class WorkloadClassifier:
     """
-    Nearest-centroid classifier over the 4-dim /proc feature space.
+    Nearest-centroid classifier over the 8-dim eBPF+proc feature space.
 
     Each workload class has a centroid learned from controlled experiments
     (tune_experiment.py) and a pre-validated best config. At runtime, the
