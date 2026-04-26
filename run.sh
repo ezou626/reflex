@@ -12,6 +12,7 @@ RUN_IO=0
 RUN_CPU=0
 RUN_MEM=0
 STRESSOR_CMD=""
+VERBOSE=0
 
 for arg in "$@"; do
     case $arg in
@@ -28,6 +29,8 @@ done
 # Re-parse properly to handle --stressor "CMD"
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -r)         rm -rf /home/ubuntu/reflex/data/runs/; shift ;;
+        -v)         VERBOSE=1;         shift ;;
         --io)       RUN_IO=1;          shift ;;
         --cpu)      RUN_CPU=1;         shift ;;
         --mem)      RUN_MEM=1;         shift ;;
@@ -40,23 +43,30 @@ mkdir -p build
 
 # Generate skeleton if stale
 if [ ! -f "build/collector.skel.h" ] || [ "build/collector.bpf.o" -nt "build/collector.skel.h" ]; then
-    bpftool gen skeleton build/collector.bpf.o > build/collector.skel.h
+    bpftool gen skeleton build/collector.bpf.o > build/collector.skel.h 2>/dev/null
 fi
 
 if [ ! -f "src/vmlinux.h" ]; then
     if [ -f "/sys/kernel/btf/vmlinux" ]; then
-        bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
+        bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h 2>/dev/null
     else
         echo "Error - kernel btf not found"
         exit 1
     fi
 fi
 
-make
+if [ $VERBOSE -eq 1 ]; then
+    make > /dev/null 2>&1
+else
+    make
+fi
 
-CGROUP_IDS=()
 TESTER_PIDS=()
 CGROUP_DIRS=()
+
+rm -f /tmp/reflex_cgroups
+touch /tmp/reflex_cgroups
+chmod 666 /tmp/reflex_cgroups
 
 cleanup() {
     for pid in "${TESTER_PIDS[@]}"; do
@@ -76,14 +86,14 @@ launch_in_cgroup() {
     sudo mkdir -p "$cgdir"
     local cgid
     cgid=$(stat -c %i "$cgdir")
-    CGROUP_IDS+=("$cgid")
     CGROUP_DIRS+=("$cgdir")
+    echo "$cgid" >> /tmp/reflex_cgroups
 
     "$binary" &
     local pid=$!
     TESTER_PIDS+=("$pid")
     echo "$pid" | sudo tee "$cgdir/cgroup.procs" > /dev/null
-    echo "Launched $binary (pid=$pid, cgid=$cgid)"
+    [ $VERBOSE -eq 0 ] && echo "Launched $binary (pid=$pid, cgid=$cgid)"
 }
 
 launch_cmd_in_cgroup() {
@@ -93,14 +103,14 @@ launch_cmd_in_cgroup() {
     sudo mkdir -p "$cgdir"
     local cgid
     cgid=$(stat -c %i "$cgdir")
-    CGROUP_IDS+=("$cgid")
     CGROUP_DIRS+=("$cgdir")
+    echo "$cgid" >> /tmp/reflex_cgroups
 
     bash -c "$cmd" &
     local pid=$!
     TESTER_PIDS+=("$pid")
     echo "$pid" | sudo tee "$cgdir/cgroup.procs" > /dev/null
-    echo "Launched stressor (pid=$pid, cgid=$cgid): $cmd"
+    [ $VERBOSE -eq 0 ] && echo "Launched stressor (pid=$pid, cgid=$cgid): $cmd"
 }
 
 if [ $RUN_IO -eq 1 ]; then
@@ -119,11 +129,8 @@ if [ -n "$STRESSOR_CMD" ]; then
     launch_cmd_in_cgroup "$STRESSOR_CMD" /sys/fs/cgroup/reflex_stressor
 fi
 
-if [ ${#CGROUP_IDS[@]} -eq 0 ]; then
-    echo "No workload specified. Use --io, --cpu, --mem, or --stressor \"CMD\"."
-    exit 1
-fi
-
 VENV_PYTHON="$(dirname "$0")/.venv/bin/python3"
 PYTHON="${VENV_PYTHON:-python3}"
-sudo "$PYTHON" daemon/main.py --cgroup-ids "${CGROUP_IDS[@]}"
+DAEMON_ARGS=()
+[ $VERBOSE -eq 1 ] && DAEMON_ARGS+=(--classify-only)
+sudo "$PYTHON" daemon/main.py "${DAEMON_ARGS[@]}"

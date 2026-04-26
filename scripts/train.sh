@@ -5,13 +5,14 @@
 #   sudo ./scripts/train.sh [options]
 #
 # Options:
-#   --experiments N    BO experiments per workload (default: 25)
-#   --duration S       Measurement window seconds (default: 45)
-#   --warmup S         Stressor ramp-up seconds (default: 10)
-#   --settle S         Cool-down between experiments (default: 8)
-#   --workloads LIST   Comma-separated workload numbers, e.g. 1,3,6-10
-#   --dry-run          Skip sysctl writes, stressor, and daemon (loop test only)
-#   --help             Show this message
+#   -n N    BO experiments per workload (default: 25)
+#   -d S    Measurement window seconds (default: 45)
+#   -w S    Stressor ramp-up seconds (default: 10)
+#   -s S    Cool-down between experiments (default: 8)
+#   -l LIST Comma-separated workload numbers, e.g. 1,3,6-10
+#   -x      Skip sysctl writes, stressor, and daemon (loop test only)
+#   -r      Reset models (delete experiments.jsonl, library.json, gp_*.pkl)
+#   -h      Show this message
 #
 # Required:   sudo apt install -y stress-ng fio sysbench gcc
 # Optional:   sudo apt install -y ffmpeg imagemagick nginx apache2-utils
@@ -19,7 +20,7 @@
 #
 # Estimated time with defaults (25 experiments x 45s window):
 #   each workload ≈ 28 min  →  25 workloads ≈ 12 hours
-#   Run overnight, or pick a subset with --workloads 1,6,11,21,22
+#   Run overnight, or pick a subset with -l 1,6,11,21,22
 
 set -euo pipefail
 
@@ -58,21 +59,20 @@ DRY_RUN_FLAG=""
 WORKLOAD_FILTER=""
 
 # ---------------------------------------------------------------------------
-# Argument parsing
+# Argument parsing  (-n experiments  -d duration  -w warmup  -s settle
+#                    -l workloads    -x dry-run   -r reset   -h help)
 # ---------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --experiments) EXPERIMENTS="$2"; shift 2 ;;
-        --duration)    DURATION="$2";    shift 2 ;;
-        --warmup)      WARMUP="$2";      shift 2 ;;
-        --settle)      SETTLE="$2";      shift 2 ;;
-        --workloads)   WORKLOAD_FILTER="$2"; shift 2 ;;
-        --dry-run)     DRY_RUN_FLAG="--dry-run"; shift ;;
-        --help)
-            sed -n '2,14p' "$0" | sed 's/^# \?//'
-            exit 0
-            ;;
-        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+while getopts "n:d:w:s:l:rxh" opt; do
+    case $opt in
+        n) EXPERIMENTS="$OPTARG" ;;
+        d) DURATION="$OPTARG" ;;
+        w) WARMUP="$OPTARG" ;;
+        s) SETTLE="$OPTARG" ;;
+        l) WORKLOAD_FILTER="$OPTARG" ;;
+        x) DRY_RUN_FLAG="--dry-run" ;;
+        r) rm -f "${REPO_ROOT}/models/experiments.jsonl" "${REPO_ROOT}/models/library.json" "${REPO_ROOT}/models/gp_"*.pkl ;;
+        h) sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) exit 1 ;;
     esac
 done
 

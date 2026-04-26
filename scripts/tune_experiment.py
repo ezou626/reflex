@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -688,8 +689,8 @@ def main() -> int:
         print("error: must run as root to write sysctl values", file=sys.stderr)
         return 1
 
-    binary = Path(stressor_cmd[0])
-    if binary.exists() is False and not args.dry_run:
+    binary = stressor_cmd[0]
+    if not args.dry_run and shutil.which(binary) is None and not Path(binary).exists():
         print(f"error: stressor binary not found: {binary}", file=sys.stderr)
         return 1
 

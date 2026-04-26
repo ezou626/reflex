@@ -35,10 +35,8 @@ from applied_stack import AppliedStack
 from baseline import parse_proc_cmdline, sysctl_baseline_at_start
 from config.loaders import load_tuning_policy
 from control import (
-    BOProposalController,
     CompositeProposalController,
     ExternalJsonlProposalController,
-    HeuristicProposalController,
     WorkloadAwareController,
     WorkloadClassifier,
 )
@@ -484,12 +482,21 @@ def main() -> int:
         help="Cgroup IDs to whitelist for syscall filtering (from run.sh). Omit to monitor all.",
     )
     parser.add_argument(
+        "--classify-only",
+        action="store_true",
+        help="Suppress all output except workload class switch messages.",
+    )
+    parser.add_argument(
         "--event-trigger-threshold",
         type=int,
         default=8000,
         help="Trigger an early decision tick if window event volume exceeds this.",
     )
     args = parser.parse_args()
+
+    _real_stdout = sys.stdout
+    if args.classify_only:
+        sys.stdout = open(os.devnull, "w")
 
     run_id = args.run_id or _default_run_id()
     run_dir = args.run_dir or _default_run_dir(run_id)
@@ -517,11 +524,6 @@ def main() -> int:
         run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
     )
     stack.load()
-    heuristic = HeuristicProposalController()
-    bo_controller = BOProposalController(
-        evaluate_after_windows=policy.evaluate_after_windows,
-        fallback=heuristic,
-    )
     classifier = WorkloadClassifier.from_model_dir(_repo_root() / "models")
     if classifier.is_loaded():
         print(
@@ -529,18 +531,24 @@ def main() -> int:
             flush=True,
         )
     workload_controller = WorkloadAwareController(classifier, min_consecutive=3)
-    proposal_controllers: list = [workload_controller, bo_controller]
+    controllers: list = [workload_controller]
     if args.external_proposals is not None:
-        proposal_controllers.append(
-            ExternalJsonlProposalController(args.external_proposals)
-        )
-    proposal_pipeline = CompositeProposalController(proposal_controllers)
+        controllers.append(ExternalJsonlProposalController(args.external_proposals))
+    proposal_pipeline = (
+        controllers[0] if len(controllers) == 1
+        else CompositeProposalController(controllers)
+    )
     action_logger = ActionLogger(path=decision_log, run_id=run_id)
     should_decide_early = False
+    _active_class: list[str | None] = [None]
 
     loader_args = ["sudo", "./build/loader", str(os.getpid())]
     loader_args += [str(c) for c in (args.cgroup_ids or [])]
-    loader_proc = subprocess.Popen(loader_args, stdout=subprocess.PIPE)
+    loader_proc = subprocess.Popen(
+        loader_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL if args.classify_only else None,
+    )
     ev_queue: queue.Queue[_Ev] = queue.Queue()
 
     def _reader() -> None:
@@ -603,13 +611,23 @@ def main() -> int:
             )
             batch_index = 0
             for chosen in decision.chosen_actions:
+                if chosen.action_id == "workload_class_config":
+                    new_class = chosen.metadata.get("workload_class")
+                    prev_class = _active_class[0]
+                    if new_class and new_class != prev_class:
+                        prev_str = prev_class if prev_class else "unclassified"
+                        print(
+                            f"cluster {new_class} detected: configs switched from {prev_str} -> {new_class}",
+                            file=_real_stdout,
+                            flush=True,
+                        )
+                        _active_class[0] = new_class
                 tuner = tuner_registry.get(chosen.tuner_id)
                 if tuner is None:
                     batch_index += 1
                     continue
                 try:
                     applied = tuner.apply(chosen, dry_run=args.dry_run)
-                    bo_controller.record_applied(chosen.tuner_id, int(chosen.value), summary)
                     seq = stack.push(applied, window_id, batch_index)
                     depth = stack.depth()
                     action_logger.log_apply(
@@ -654,8 +672,6 @@ def main() -> int:
                     )
                 if frames:
                     decision_engine.note_rollback()
-                for fr in frames:
-                    bo_controller.record_rollback(fr.tuner_id)
 
         print(
             f"Writing raw events to {args.output} and summaries to "

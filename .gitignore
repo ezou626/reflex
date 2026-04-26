@@ -5,3 +5,4 @@ data/
 /vmlinux.h
 src/vmlinux.h
 __pycache__/
+models/*.pkl

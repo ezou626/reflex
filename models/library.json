@@ -1,31 +1,39 @@
 {
   "cluster_0": {
     "centroid": [
-      0.08555138289953623,
-      0.8760849867192949,
-      0.0012699999999999999,
-      0.016
+      0.1416909090909091,
+      0.0,
+      0.011546151515151514,
+      0.5128626363636365,
+      0.31751418181818186,
+      0.0018703030303030554,
+      0.0,
+      0.007669090909090931
     ],
     "best_config": {
-      "sysctl_vm_swappiness": 59,
-      "sysctl_vm_dirty_ratio": 5,
+      "sysctl_vm_swappiness": 21,
+      "sysctl_vm_dirty_ratio": 28,
       "sysctl_vm_dirty_background_ratio": 3,
-      "sysctl_vm_vfs_cache_pressure": 129,
-      "sysctl_vm_watermark_scale_factor": 86,
-      "sysctl_vm_min_free_kbytes": 21736,
-      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 19501,
-      "sysctl_kernel_sched_autogroup_enabled": 0
+      "sysctl_vm_vfs_cache_pressure": 158,
+      "sysctl_vm_watermark_scale_factor": 188,
+      "sysctl_vm_min_free_kbytes": 16473,
+      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 19852,
+      "sysctl_kernel_sched_autogroup_enabled": 1
     },
-    "best_reward": 0.371078,
-    "n_observations": 2,
-    "dominant_stressor": "./build/tester_mem 80 5"
+    "best_reward": 0.029887,
+    "n_observations": 3,
+    "dominant_stressor": "stress-ng --vm 2 --vm-bytes 70% --vm-keep"
   },
   "cluster_1": {
     "centroid": [
-      0.07752902155887231,
-      0.8762750958073907,
-      0.00112,
-      0.017
+      0.6338363636363635,
+      0.0,
+      0.006992878787878788,
+      0.9712889090909091,
+      0.277924303030303,
+      0.9114236363636362,
+      0.0,
+      0.9999999999999999
     ],
     "best_config": {
       "sysctl_vm_swappiness": 74,
@@ -37,8 +45,58 @@
       "sysctl_kernel_sched_cfs_bandwidth_slice_us": 9726,
       "sysctl_kernel_sched_autogroup_enabled": 0
     },
-    "best_reward": 0.373018,
-    "n_observations": 1,
-    "dominant_stressor": "./build/tester_mem 80 5"
+    "best_reward": -0.184322,
+    "n_observations": 3,
+    "dominant_stressor": "stress-ng --vm 2 --vm-bytes 80% --vm-keep --hdd 2"
+  },
+  "cluster_2": {
+    "centroid": [
+      0.2970878787878788,
+      0.0,
+      0.006591757575757576,
+      1.0,
+      0.6240989393939395,
+      0.001010606060606073,
+      0.0,
+      0.010022121212121232
+    ],
+    "best_config": {
+      "sysctl_vm_swappiness": 57,
+      "sysctl_vm_dirty_ratio": 21,
+      "sysctl_vm_dirty_background_ratio": 7,
+      "sysctl_vm_vfs_cache_pressure": 79,
+      "sysctl_vm_watermark_scale_factor": 147,
+      "sysctl_vm_min_free_kbytes": 22055,
+      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 15038,
+      "sysctl_kernel_sched_autogroup_enabled": 0
+    },
+    "best_reward": 0.090798,
+    "n_observations": 6,
+    "dominant_stressor": "stress-ng --cpu 4 --cpu-method matrixprod"
+  },
+  "cluster_3": {
+    "centroid": [
+      0.025081818181818205,
+      0.0,
+      0.012945424242424241,
+      0.5874304242424242,
+      0.7991381515151514,
+      0.2963266666666667,
+      0.0,
+      0.0067745454545454775
+    ],
+    "best_config": {
+      "sysctl_vm_swappiness": 74,
+      "sysctl_vm_dirty_ratio": 11,
+      "sysctl_vm_dirty_background_ratio": 20,
+      "sysctl_vm_vfs_cache_pressure": 140,
+      "sysctl_vm_watermark_scale_factor": 95,
+      "sysctl_vm_min_free_kbytes": 27850,
+      "sysctl_kernel_sched_cfs_bandwidth_slice_us": 9726,
+      "sysctl_kernel_sched_autogroup_enabled": 0
+    },
+    "best_reward": 0.205407,
+    "n_observations": 3,
+    "dominant_stressor": "fio --name=t --rw=randrw --bs=4k --size=512M --numjobs=2 --iodepth=16 --direct=1 --time_based --runtime=120 --filename=/tmp/reflex_qt.fio"
   }
 }
