@@ -17,12 +17,14 @@ volatile const __u8  use_cgroup_filter = 0;
 /* Unified event payload — layout is naturally 48 bytes, no padding needed.
  * value_i32/value_u32 are event-specific (see event type constants below).
  * Matches what daemon/main.py expects via struct.unpack. */
-#define EVENT_EXEC         1
-#define EVENT_FORK         2
-#define EVENT_EXIT         3
-#define EVENT_SCHED_SWITCH 4
-#define EVENT_SYSCALL_EXIT 5
-#define EVENT_RQ_LATENCY   6
+#define EVENT_EXEC           1
+#define EVENT_FORK           2
+#define EVENT_EXIT           3
+#define EVENT_SCHED_SWITCH   4
+#define EVENT_SYSCALL_EXIT   5
+#define EVENT_RQ_LATENCY     6
+#define EVENT_DIRECT_RECLAIM 7  /* vmscan: process stalled for memory reclaim */
+#define EVENT_BLK_LATENCY    8  /* block: I/O request completion latency */
 
 struct payload {
     __u32 event_type;
@@ -51,6 +53,22 @@ struct {
   __type(key, u32);
   __type(value, u64);
 } wakeup_ts SEC(".maps");
+
+/* direct reclaim start timestamps, keyed by pid */
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 4096);
+  __type(key, u32);
+  __type(value, u64);
+} reclaim_ts SEC(".maps");
+
+/* block I/O issue timestamps, keyed by (dev<<32)|sector */
+struct {
+  __uint(type, BPF_MAP_TYPE_HASH);
+  __uint(max_entries, 4096);
+  __type(key, u64);
+  __type(value, u64);
+} blk_issue_ts SEC(".maps");
 
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
@@ -224,5 +242,80 @@ int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
 }
 
 // tp/raw_syscalls/sys_enter is a standard tracepoint not a raw tracepoint
+
+/* Record when a process enters direct reclaim (memory pressure stall). */
+SEC("tp/vmscan/mm_vmscan_direct_reclaim_begin")
+int handle_reclaim_begin(struct trace_event_raw_mm_vmscan_direct_reclaim_begin_template *ctx) {
+    __u64 ptg = bpf_get_current_pid_tgid();
+    __u32 pid = ptg >> 32;
+    if (pid == python_pid || pid == loader_pid)
+        return 0;
+    __u64 ts = bpf_ktime_get_ns();
+    bpf_map_update_elem(&reclaim_ts, &pid, &ts, BPF_ANY);
+    return 0;
+}
+
+/* Compute direct reclaim duration and emit EVENT_DIRECT_RECLAIM.
+ * value_u32 = stall duration in microseconds.
+ * High rate or high latency here = severe memory pressure. */
+SEC("tp/vmscan/mm_vmscan_direct_reclaim_end")
+int handle_reclaim_end(struct trace_event_raw_mm_vmscan_direct_reclaim_end_template *ctx) {
+    __u64 ptg = bpf_get_current_pid_tgid();
+    __u32 pid = ptg >> 32;
+    __u64 *start = bpf_map_lookup_elem(&reclaim_ts, &pid);
+    if (!start) return 0;
+
+    __u64 now = bpf_ktime_get_ns();
+    __u32 lat_us = (__u32)((now - *start) / 1000);
+    bpf_map_delete_elem(&reclaim_ts, &pid);
+
+    struct payload *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) return 0;
+    e->event_type = EVENT_DIRECT_RECLAIM;
+    e->cpu        = bpf_get_smp_processor_id();
+    e->pid        = pid;
+    e->tgid       = (__u32)ptg;
+    e->ts_ns      = now;
+    e->value_i32  = 0;
+    e->value_u32  = lat_us;
+    bpf_get_current_comm(&e->comm, sizeof(e->comm));
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
+
+/* Record block I/O issue timestamp. Key = (dev << 32) | sector. */
+SEC("tp/block/block_rq_issue")
+int handle_blk_issue(struct trace_event_raw_block_rq *ctx) {
+    __u64 key = ((__u64)ctx->dev << 32) | ((__u64)ctx->sector & 0xFFFFFFFF);
+    __u64 ts  = bpf_ktime_get_ns();
+    bpf_map_update_elem(&blk_issue_ts, &key, &ts, BPF_ANY);
+    return 0;
+}
+
+/* Compute block I/O completion latency and emit EVENT_BLK_LATENCY.
+ * value_u32 = latency in microseconds. */
+SEC("tp/block/block_rq_complete")
+int handle_blk_complete(struct trace_event_raw_block_rq_completion *ctx) {
+    __u64 key   = ((__u64)ctx->dev << 32) | ((__u64)ctx->sector & 0xFFFFFFFF);
+    __u64 *start = bpf_map_lookup_elem(&blk_issue_ts, &key);
+    if (!start) return 0;
+
+    __u64 now    = bpf_ktime_get_ns();
+    __u32 lat_us = (__u32)((now - *start) / 1000);
+    bpf_map_delete_elem(&blk_issue_ts, &key);
+
+    struct payload *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) return 0;
+    e->event_type = EVENT_BLK_LATENCY;
+    e->cpu        = bpf_get_smp_processor_id();
+    e->pid        = 0;
+    e->tgid       = 0;
+    e->ts_ns      = now;
+    e->value_i32  = 0;
+    e->value_u32  = lat_us;
+    e->comm[0]    = '\0';
+    bpf_ringbuf_submit(e, 0);
+    return 0;
+}
 
 char _license[] SEC("license") = "GPL";

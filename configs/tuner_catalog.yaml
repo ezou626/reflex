@@ -1,3 +1,139 @@
+version: 1
 tuners:
-  - id: sysctl_swappiness
+  - id: sysctl_vm_swappiness
+    category: vm
+    description: Tendency to reclaim anonymous pages vs page cache
+    scope: runtime_sysctl
+    sysctl: vm.swappiness
+    kind: int
     enabled: true
+    min_value: 10
+    max_value: 90
+    step: 5
+  - id: sysctl_vm_dirty_ratio
+    category: vm
+    description: Ratio of dirty pages at which background writeback escalates
+    scope: runtime_sysctl
+    sysctl: vm.dirty_ratio
+    kind: int
+    enabled: true
+    min_value: 5
+    max_value: 40
+    step: 2
+  - id: sysctl_vm_dirty_background_ratio
+    category: vm
+    description: Dirty memory percentage to start background writeback
+    scope: runtime_sysctl
+    sysctl: vm.dirty_background_ratio
+    kind: int
+    enabled: true
+    min_value: 2
+    max_value: 25
+    step: 2
+  - id: sysctl_vm_watermark_scale_factor
+    category: vm
+    description: How aggressively kswapd wakes to reclaim memory before hitting watermarks
+    scope: runtime_sysctl
+    sysctl: vm.watermark_scale_factor
+    kind: int
+    enabled: true
+    min_value: 10
+    max_value: 200
+    step: 10
+  - id: sysctl_vm_min_free_kbytes
+    category: vm
+    description: Minimum free memory the kernel keeps in reserve to avoid OOM
+    scope: runtime_sysctl
+    sysctl: vm.min_free_kbytes
+    kind: int
+    enabled: true
+    min_value: 16384
+    max_value: 131072
+    step: 8192
+  - id: sysctl_kernel_sched_cfs_bandwidth_slice_us
+    category: cpu
+    description: CFS scheduling time-slice length; smaller reduces latency, larger improves throughput
+    scope: runtime_sysctl
+    sysctl: kernel.sched_cfs_bandwidth_slice_us
+    kind: int
+    enabled: true
+    min_value: 1000
+    max_value: 20000
+    step: 1000
+  - id: sysctl_kernel_sched_autogroup_enabled
+    category: cpu
+    description: Group tasks by session for fairer scheduling; off favours batch throughput
+    scope: runtime_sysctl
+    sysctl: kernel.sched_autogroup_enabled
+    kind: int
+    enabled: true
+    min_value: 0
+    max_value: 1
+    step: 1
+  - id: sysctl_vm_vfs_cache_pressure
+    category: vm
+    description: Tendency to reclaim inode/dentry cache vs swap
+    scope: runtime_sysctl
+    sysctl: vm.vfs_cache_pressure
+    kind: int
+    enabled: true
+    min_value: 50
+    max_value: 200
+    step: 10
+  - id: sysctl_net_core_somaxconn
+    category: net
+    description: Maximum listen backlog per socket
+    scope: runtime_sysctl
+    sysctl: net.core.somaxconn
+    kind: int
+    enabled: false
+  - id: sysctl_net_core_netdev_max_backlog
+    category: net
+    description: Max netdev receive queue backlog
+    scope: runtime_sysctl
+    sysctl: net.core.netdev_max_backlog
+    kind: int
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_rmem
+    category: net
+    description: Memory bounds for TCP receive buffer autotuning
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_rmem
+    kind: ints
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_wmem
+    category: net
+    description: Memory bounds for TCP send buffer autotuning
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_wmem
+    kind: ints
+    enabled: false
+  - id: sysctl_net_ipv4_tcp_mem
+    category: net
+    description: Global TCP memory pressure thresholds in pages
+    scope: runtime_sysctl
+    sysctl: net.ipv4.tcp_mem
+    kind: ints
+    enabled: false
+  - id: sysctl_fs_aio_max_nr
+    category: fs
+    description: Maximum number of asynchronous I/O requests
+    scope: runtime_sysctl
+    sysctl: fs.aio-max-nr
+    kind: int
+    enabled: false
+  - id: sysctl_fs_file_max
+    category: fs
+    description: System-wide limit on open file handles
+    scope: runtime_sysctl
+    sysctl: fs.file-max
+    kind: int
+    enabled: false
+  - id: boot_cmdline_mitigations
+    category: boot
+    description: Kernel mitigations boot parameter if present on cmdline
+    scope: boot_cmdline
+    sysctl: ""
+    kind: str
+    cmdline_key: mitigations
+    enabled: false

@@ -31,9 +31,18 @@ from pathlib import Path
 from typing import Any
 
 from action_log import ActionLogger
-from decision_engine import DecisionEngine, TuningPolicy
+from applied_stack import AppliedStack
+from baseline import parse_proc_cmdline, sysctl_baseline_at_start
+from config.loaders import load_tuning_policy
+from control import (
+    CompositeProposalController,
+    ExternalJsonlProposalController,
+    WorkloadAwareController,
+    WorkloadClassifier,
+)
+from decision_engine import DecisionEngine
 from history import WindowHistory
-from rollback import RollbackManager
+from rollback import RollbackManager, frames_to_rollback
 from tuners.base import AppliedAction
 from tuners.registry import TunerRegistry
 
@@ -52,20 +61,24 @@ class _Ev:
          self.ts_ns, self.value_i32, self.value_u32, self.comm) = fields
 
 
-EVENT_EXEC = 1
-EVENT_FORK = 2
-EVENT_EXIT = 3
-EVENT_SCHED_SWITCH = 4
-EVENT_SYSCALL_EXIT = 5
-EVENT_RQ_LATENCY = 6
+EVENT_EXEC           = 1
+EVENT_FORK           = 2
+EVENT_EXIT           = 3
+EVENT_SCHED_SWITCH   = 4
+EVENT_SYSCALL_EXIT   = 5
+EVENT_RQ_LATENCY     = 6
+EVENT_DIRECT_RECLAIM = 7
+EVENT_BLK_LATENCY    = 8
 
 EVENT_NAME = {
-    EVENT_EXEC: "exec",
-    EVENT_FORK: "fork",
-    EVENT_EXIT: "exit",
-    EVENT_SCHED_SWITCH: "sched_switch",
-    EVENT_SYSCALL_EXIT: "sys_exit",
-    EVENT_RQ_LATENCY: "rq_latency",
+    EVENT_EXEC:           "exec",
+    EVENT_FORK:           "fork",
+    EVENT_EXIT:           "exit",
+    EVENT_SCHED_SWITCH:   "sched_switch",
+    EVENT_SYSCALL_EXIT:   "sys_exit",
+    EVENT_RQ_LATENCY:     "rq_latency",
+    EVENT_DIRECT_RECLAIM: "direct_reclaim",
+    EVENT_BLK_LATENCY:    "blk_latency",
 }
 
 PHASE1_METRIC_CONTRACTS: dict[str, dict[str, Any]] = {
@@ -199,6 +212,8 @@ class WindowState:
     syscall_error_count: int = 0
     syscall_top_counts: dict[int, int] = field(default_factory=dict)
     rq_latency_samples_us: list[int] = field(default_factory=list)
+    direct_reclaim_samples_us: list[int] = field(default_factory=list)
+    blk_latency_samples_us: list[int] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
         name = event["event_name"]
@@ -211,6 +226,10 @@ class WindowState:
             self.syscall_top_counts[sid] = self.syscall_top_counts.get(sid, 0) + 1
         elif name == "rq_latency":
             self.rq_latency_samples_us.append(int(event["rq_latency_us"]))
+        elif name == "direct_reclaim":
+            self.direct_reclaim_samples_us.append(int(event["reclaim_lat_us"]))
+        elif name == "blk_latency":
+            self.blk_latency_samples_us.append(int(event["blk_lat_us"]))
 
 
 @dataclass
@@ -296,7 +315,24 @@ def _to_event_dict(ev: Any) -> dict[str, Any]:
         base["is_error"] = int(ev.value_i32) < 0
     elif event_type == EVENT_RQ_LATENCY:
         base["rq_latency_us"] = int(ev.value_u32)
+    elif event_type == EVENT_DIRECT_RECLAIM:
+        base["reclaim_lat_us"] = int(ev.value_u32)
+    elif event_type == EVENT_BLK_LATENCY:
+        base["blk_lat_us"] = int(ev.value_u32)
     return base
+
+
+def _inject_run_baselines(
+    summary: dict[str, Any],
+    sysctl_baseline: dict[str, Any],
+    boot_params: dict[str, str | None],
+) -> dict[str, Any]:
+    out = dict(summary)
+    hf = dict(out.get("host_features", {}))
+    hf["sysctl_baseline_at_start"] = dict(sysctl_baseline)
+    hf["boot_kernel_params"] = dict(boot_params)
+    out["host_features"] = hf
+    return out
 
 
 def _build_summary(
@@ -338,6 +374,13 @@ def _build_summary(
             "rq_latency_p95_us": _quantile(window.rq_latency_samples_us, 0.95),
             "rq_latency_p99_us": _quantile(window.rq_latency_samples_us, 0.99),
             "rq_latency_count": len(window.rq_latency_samples_us),
+            "direct_reclaim_rate_per_sec": round(
+                len(window.direct_reclaim_samples_us) / window_sec, 3
+            ),
+            "direct_reclaim_lat_p95_us": _quantile(window.direct_reclaim_samples_us, 0.95),
+            "blk_latency_p50_us": _quantile(window.blk_latency_samples_us, 0.50),
+            "blk_latency_p95_us": _quantile(window.blk_latency_samples_us, 0.95),
+            "blk_latency_count": len(window.blk_latency_samples_us),
         },
         "event_counts": window.event_counts,
         "top_syscalls": [
@@ -426,11 +469,22 @@ def main() -> int:
         help="Emit decisions without changing kernel tunables.",
     )
     parser.add_argument(
+        "--external-proposals",
+        type=Path,
+        default=None,
+        help="Optional JSONL file of external TunerAction dicts (one JSON object per line).",
+    )
+    parser.add_argument(
         "--cgroup-ids",
         nargs="*",
         type=int,
         default=[],
         help="Cgroup IDs to whitelist for syscall filtering (from run.sh). Omit to monitor all.",
+    )
+    parser.add_argument(
+        "--classify-only",
+        action="store_true",
+        help="Suppress all output except workload class switch messages.",
     )
     parser.add_argument(
         "--event-trigger-threshold",
@@ -439,6 +493,10 @@ def main() -> int:
         help="Trigger an early decision tick if window event volume exceeds this.",
     )
     args = parser.parse_args()
+
+    _real_stdout = sys.stdout
+    if args.classify_only:
+        sys.stdout = open(os.devnull, "w")
 
     run_id = args.run_id or _default_run_id()
     run_dir = args.run_dir or _default_run_dir(run_id)
@@ -453,19 +511,44 @@ def main() -> int:
     args.summary_output.parent.mkdir(parents=True, exist_ok=True)
     decision_log.parent.mkdir(parents=True, exist_ok=True)
 
-    policy = TuningPolicy.from_file(args.policy_file)
+    policy = load_tuning_policy(args.policy_file)
+    boot_params = parse_proc_cmdline()
+    sysctl_baseline = sysctl_baseline_at_start(args.tuner_catalog)
     history = WindowHistory(size=max(60, policy.evaluate_after_windows + 5))
     decision_engine = DecisionEngine(policy=policy)
     rollback_manager = RollbackManager(policy=policy)
-    tuner_registry = TunerRegistry.from_catalog(args.tuner_catalog)
+    tuner_registry = TunerRegistry.from_catalog(
+        args.tuner_catalog, boot_params=boot_params
+    )
+    stack = AppliedStack(
+        run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
+    )
+    stack.load()
+    classifier = WorkloadClassifier.from_model_dir(_repo_root() / "models")
+    if classifier.is_loaded():
+        print(
+            f"Workload classifier loaded: classes={classifier.known_classes()}",
+            flush=True,
+        )
+    workload_controller = WorkloadAwareController(classifier, min_consecutive=3)
+    controllers: list = [workload_controller]
+    if args.external_proposals is not None:
+        controllers.append(ExternalJsonlProposalController(args.external_proposals))
+    proposal_pipeline = (
+        controllers[0] if len(controllers) == 1
+        else CompositeProposalController(controllers)
+    )
     action_logger = ActionLogger(path=decision_log, run_id=run_id)
-    active_action: AppliedAction | None = None
-    active_action_window_id = 0
     should_decide_early = False
+    _active_class: list[str | None] = [None]
 
     loader_args = ["sudo", "./build/loader", str(os.getpid())]
     loader_args += [str(c) for c in (args.cgroup_ids or [])]
-    loader_proc = subprocess.Popen(loader_args, stdout=subprocess.PIPE)
+    loader_proc = subprocess.Popen(
+        loader_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL if args.classify_only else None,
+    )
     ev_queue: queue.Queue[_Ev] = queue.Queue()
 
     def _reader() -> None:
@@ -508,11 +591,12 @@ def main() -> int:
                 should_decide_early = True
 
         def decision_tick(trigger: str, summary: dict[str, Any]) -> None:
-            nonlocal active_action
-            nonlocal active_action_window_id
+            summary = _inject_run_baselines(summary, sysctl_baseline, boot_params)
             history.add(summary)
             comparison = history.compare_last_two(policy.compare_metrics)
-            proposals = tuner_registry.collect_proposals(summary, history.latest(20))
+            proposals = proposal_pipeline.propose(
+                summary, history.latest(20), registry=tuner_registry
+            )
             decision = decision_engine.decide(
                 trigger=trigger,
                 summary=summary,
@@ -525,42 +609,68 @@ def main() -> int:
                 summary=summary,
                 comparison_delta=None if comparison is None else comparison.delta,
             )
-            chosen = decision.chosen_action
-            if chosen is not None:
-                tuner = tuner_registry.get(chosen.tuner_id)
-                if tuner is not None:
-                    try:
-                        applied = tuner.apply(chosen, dry_run=args.dry_run)
-                        active_action = applied
-                        active_action_window_id = window_id
-                        action_logger.log_apply(window_id, applied)
-                    except OSError as exc:
-                        action_logger.log_rollback(
-                            window_id=window_id,
-                            applied=AppliedAction(action=chosen, previous_value=None),
-                            reason=f"apply_failed:{exc}",
-                            effects={},
-                            ok=False,
+            batch_index = 0
+            for chosen in decision.chosen_actions:
+                if chosen.action_id == "workload_class_config":
+                    new_class = chosen.metadata.get("workload_class")
+                    prev_class = _active_class[0]
+                    if new_class and new_class != prev_class:
+                        prev_str = prev_class if prev_class else "unclassified"
+                        print(
+                            f"cluster {new_class} detected: configs switched from {prev_str} -> {new_class}",
+                            file=_real_stdout,
+                            flush=True,
                         )
-            if active_action is not None:
-                rb = rollback_manager.evaluate(active_action, history)
-                if rb.should_rollback:
-                    tuner = tuner_registry.get(active_action.action.tuner_id)
+                        _active_class[0] = new_class
+                tuner = tuner_registry.get(chosen.tuner_id)
+                if tuner is None:
+                    batch_index += 1
+                    continue
+                try:
+                    applied = tuner.apply(chosen, dry_run=args.dry_run)
+                    seq = stack.push(applied, window_id, batch_index)
+                    depth = stack.depth()
+                    action_logger.log_apply(
+                        window_id,
+                        applied,
+                        apply_sequence=seq,
+                        stack_depth=depth,
+                        stack_index=depth - 1,
+                        batch_index=batch_index,
+                    )
+                except OSError as exc:
+                    action_logger.log_rollback(
+                        window_id=window_id,
+                        applied=AppliedAction(action=chosen, previous_value=None),
+                        reason=f"apply_failed:{exc}",
+                        effects={},
+                        ok=False,
+                    )
+                batch_index += 1
+
+            rb = rollback_manager.evaluate_for_top_of_stack(stack, history)
+            if rb.should_rollback:
+                frames = frames_to_rollback(stack, policy)
+                for fr in frames:
+                    applied = fr.to_applied_action()
+                    tuner = tuner_registry.get(fr.tuner_id)
                     ok = False
                     if tuner is not None:
                         try:
-                            ok = tuner.rollback(active_action, dry_run=args.dry_run)
+                            ok = tuner.rollback(applied, dry_run=args.dry_run)
                         except OSError:
                             ok = False
                     action_logger.log_rollback(
-                        window_id=active_action_window_id or window_id,
-                        applied=active_action,
+                        window_id=window_id,
+                        applied=applied,
                         reason=rb.reason,
                         effects=rb.effects,
                         ok=ok,
+                        apply_sequence=fr.apply_sequence,
+                        stack_depth=stack.depth(),
+                        stack_index=stack.depth(),
                     )
-                    active_action = None
-                    active_action_window_id = 0
+                if frames:
                     decision_engine.note_rollback()
 
         print(

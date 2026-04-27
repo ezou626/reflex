@@ -33,14 +33,6 @@ class BaseTuner(abc.ABC):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def propose(
-        self,
-        summary: dict[str, Any],
-        history: list[dict[str, Any]],
-    ) -> list[TunerAction]:
-        raise NotImplementedError
-
-    @abc.abstractmethod
     def apply(self, action: TunerAction, dry_run: bool = False) -> AppliedAction:
         raise NotImplementedError
 

@@ -45,8 +45,10 @@
   - Daemon now supports a separate decision/action stream:
     - `--run-id`, `--run-dir` for run artifacts under `data/runs/<run-id>`
     - `--decision-log-output` for decision/action/rollback JSONL
-    - `--policy-file` and `--tuner-catalog` for control-plane config
+    - `--policy-file` (YAML; see [`configs/tuning_policy.yaml`](configs/tuning_policy.yaml)) and `--tuner-catalog` (sysctl catalog; [`configs/tuner_catalog.yaml`](configs/tuner_catalog.yaml))
+    - `--external-proposals` optional JSONL of actions from an external or ML controller
     - `--dry-run` for baseline collection without applying tunables
+    - `uv sync --extra dev && uv run pytest` runs catalog and sysctl helper tests
   - Benchmark + profile loop:
     - `bash benchmarks/run_profile.sh cpu_bound baseline`
     - `bash benchmarks/run_profile.sh cpu_bound tuned`

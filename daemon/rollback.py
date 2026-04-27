@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from decision_engine import TuningPolicy
+from applied_stack import AppliedStack, StackFrame
+from config.schema import TuningPolicy
 from history import WindowHistory
 from tuners.base import AppliedAction
 
@@ -18,6 +19,20 @@ class RollbackResult:
 class RollbackManager:
     def __init__(self, policy: TuningPolicy) -> None:
         self.policy = policy
+
+    def evaluate_for_top_of_stack(
+        self,
+        stack: AppliedStack,
+        history: WindowHistory,
+    ) -> RollbackResult:
+        tail = stack.peek_tail()
+        if tail is None:
+            return RollbackResult(
+                should_rollback=False,
+                reason="no_applied_action",
+                effects={},
+            )
+        return self.evaluate(tail.to_applied_action(), history)
 
     def evaluate(
         self,
@@ -50,6 +65,17 @@ class RollbackManager:
                 effects=effects,
             )
         return RollbackResult(should_rollback=False, reason="no_regression", effects=effects)
+
+
+def frames_to_rollback(stack: AppliedStack, policy: TuningPolicy) -> list[StackFrame]:
+    """Pop frame(s) from stack according to rollback_batch_granularity (caller persists)."""
+    tail = stack.peek_tail()
+    if tail is None:
+        return []
+    if policy.rollback_batch_granularity == "per_window_batch":
+        return stack.pop_batch_same_window(tail.window_id)
+    popped = stack.pop_tail()
+    return [popped] if popped is not None else []
 
 
 def _value_for_key(summary: dict[str, Any], key: str) -> float:

@@ -31,6 +31,18 @@ class ActionLogger:
         comparison_delta: dict[str, float] | None,
     ) -> int:
         self._window_id += 1
+        chosen_list = [
+            {
+                "tuner_id": a.tuner_id,
+                "action_id": a.action_id,
+                "target": a.target,
+                "value": a.value,
+                "reason": a.reason,
+                "priority": a.priority,
+                "metadata": a.metadata,
+            }
+            for a in decision.chosen_actions
+        ]
         entry = {
             "record_type": "decision",
             "run_id": self.run_id,
@@ -39,17 +51,7 @@ class ActionLogger:
             "trigger": trigger,
             "reason": decision.reason,
             "candidate_actions": decision.candidate_actions,
-            "chosen_action": None
-            if decision.chosen_action is None
-            else {
-                "tuner_id": decision.chosen_action.tuner_id,
-                "action_id": decision.chosen_action.action_id,
-                "target": decision.chosen_action.target,
-                "value": decision.chosen_action.value,
-                "reason": decision.chosen_action.reason,
-                "priority": decision.chosen_action.priority,
-                "metadata": decision.chosen_action.metadata,
-            },
+            "chosen_actions": chosen_list,
             "window_metrics": summary.get("metrics", {}),
             "window_host_features": summary.get("host_features", {}),
             "window_delta": comparison_delta or {},
@@ -57,7 +59,16 @@ class ActionLogger:
         self._write(entry)
         return self._window_id
 
-    def log_apply(self, window_id: int, applied: AppliedAction) -> None:
+    def log_apply(
+        self,
+        window_id: int,
+        applied: AppliedAction,
+        *,
+        apply_sequence: int,
+        stack_depth: int,
+        stack_index: int,
+        batch_index: int,
+    ) -> None:
         self._write(
             {
                 "record_type": "action_apply",
@@ -70,6 +81,10 @@ class ActionLogger:
                 "value": applied.action.value,
                 "previous_value": applied.previous_value,
                 "metadata": applied.metadata,
+                "apply_sequence": apply_sequence,
+                "stack_depth": stack_depth,
+                "stack_index": stack_index,
+                "batch_index": batch_index,
             }
         )
 
@@ -80,6 +95,10 @@ class ActionLogger:
         reason: str,
         effects: dict[str, float],
         ok: bool,
+        *,
+        apply_sequence: int = -1,
+        stack_depth: int = -1,
+        stack_index: int = -1,
     ) -> None:
         self._write(
             {
@@ -95,5 +114,8 @@ class ActionLogger:
                 "rollback_ok": ok,
                 "reason": reason,
                 "effects": effects,
+                "apply_sequence": apply_sequence,
+                "stack_depth": stack_depth,
+                "stack_index": stack_index,
             }
         )

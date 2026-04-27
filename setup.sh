@@ -7,4 +7,5 @@ sudo apt install -y \
   clang llvm \
   libbpf-dev libelf-dev zlib1g-dev pkg-config \
   linux-headers-$(uname -r) \
-  bpfcc-tools python3-bpfcc libbpfcc-dev
+  bpfcc-tools python3-bpfcc libbpfcc-dev \
+  stress-ng fio sysbench ffmpeg1 blender # workloads
