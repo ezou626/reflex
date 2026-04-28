@@ -5,7 +5,6 @@ import argparse
 import json
 import math
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -85,10 +84,7 @@ def _maybe_warn_stress_ng_duration(command: str, duration_sec: float) -> None:
 
 
 def _resolve_python_launcher() -> list[str]:
-    uv = shutil.which("uv")
-    if uv:
-        return [uv, "run", "python"]
-    return ["python3"]
+    return [sys.executable]
 
 
 def _check_bcc(launcher: list[str]) -> None:
@@ -237,32 +233,34 @@ def _run_workload_only(
     return timing
 
 
-def _run_three_way_scorecard(
+def _run_matrix_scorecard(
     repo_root: Path,
     runs: dict[str, Path],
     scorecard_args: list[str],
-    output_path: Path | None = None,
+    output_path: Path,
 ) -> Path | None:
-    needed = {"heuristic", "noop", "workload_only"}
-    if not needed.issubset(runs.keys()):
+    if len(runs) < 2:
         return None
-    output = output_path or (runs["heuristic"] / "scorecard_three_way.json")
+    label_paths = [f"{label}:{run_dir / 'summary.jsonl'}" for label, run_dir in runs.items()]
     proc = subprocess.run(
         [
             "python3",
-            str(repo_root / "benchmarks" / "scorecard_three_way.py"),
+            str(repo_root / "benchmarks" / "scorecard_matrix.py"),
             *scorecard_args,
-            str(runs["heuristic"] / "summary.jsonl"),
-            str(runs["noop"] / "summary.jsonl"),
-            str(runs["workload_only"] / "summary.jsonl"),
+            *label_paths,
         ],
         cwd=repo_root,
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    output.write_text(proc.stdout, encoding="utf-8")
-    return output
+    if proc.returncode != 0:
+        print(f"[matrix] scorecard_matrix.py failed (exit {proc.returncode}):", file=sys.stderr)
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr, end="")
+        return None
+    output_path.write_text(proc.stdout, encoding="utf-8")
+    return output_path
 
 
 def _import_scorecard_trials_aggregate(repo_root: Path) -> Any:
@@ -277,8 +275,8 @@ def main() -> int:
     parser.add_argument("--profile", default="cpu_bound", help="Profile name from configs/profiles.yaml.")
     parser.add_argument(
         "--controller-modes",
-        default="heuristic,noop",
-        help="Comma-separated daemon controller modes to test.",
+        default="noop,heuristic,classifier",
+        help="Comma-separated daemon controller modes to test (e.g. heuristic,classifier,noop,composite).",
     )
     parser.add_argument(
         "--include-workload-only",
@@ -479,14 +477,15 @@ def main() -> int:
             runs[mode] = run_dir
             print(f"[matrix] completed {mode}: {run_dir}")
 
-        score_out: Path | None = None
-        if args.trials > 1 and include_workload_only and modes:
-            score_out = runs["heuristic"] / f"scorecard_three_way_trial_{trial_idx}.json"
-        score_path = _run_three_way_scorecard(repo_root, runs, scorecard_flags, output_path=score_out)
+        if args.trials > 1 and batch_dir is not None:
+            score_out = batch_dir / f"scorecard_matrix_trial_{trial_idx}.json"
+        else:
+            score_out = run_root / f"{args.run_prefix}-{args.profile}-scorecard-{ts}.json"
+        score_path = _run_matrix_scorecard(repo_root, runs, scorecard_flags, output_path=score_out)
 
         if score_path:
             trial_scorecards.append(score_path)
-            print(f"[matrix] wrote three-way scorecard: {score_path}")
+            print(f"[matrix] wrote scorecard: {score_path}")
             _tdoc = json.loads(score_path.read_text(encoding="utf-8"))
             _tcp, _ = _write_scorecard_compact_sidecar(repo_root, score_path, _tdoc)
             print(f"[matrix] wrote trial compact summary: {_tcp}")
@@ -506,7 +505,7 @@ def main() -> int:
         if trial_scorecards:
             agg_mod = _import_scorecard_trials_aggregate(repo_root)
             median_doc = agg_mod.aggregate_median(trial_scorecards)
-            median_path = batch_dir / "scorecard_three_way_median.json"
+            median_path = batch_dir / "scorecard_matrix_median.json"
             median_path.write_text(json.dumps(median_doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             print(f"[matrix] wrote median aggregate: {median_path}")
             median_compact_path, compact_text = _write_scorecard_compact_sidecar(

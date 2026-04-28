@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""N-way pairwise scorecard across any set of summary.jsonl runs.
+
+Accepts any number of LABEL:PATH arguments and produces all pairwise
+comparisons. Each label names a controller mode or workload_only.
+"""
 from __future__ import annotations
 
 import argparse
@@ -12,11 +17,7 @@ from typing import Any
 def _numeric_floats(d: Any) -> dict[str, float]:
     if not isinstance(d, dict):
         return {}
-    out: dict[str, float] = {}
-    for key, val in d.items():
-        if isinstance(val, (int, float)):
-            out[str(key)] = float(val)
-    return out
+    return {str(k): float(v) for k, v in d.items() if isinstance(v, (int, float))}
 
 
 def _load_run_metadata(summary_path: Path) -> dict[str, Any] | None:
@@ -61,11 +62,7 @@ def load_means(
     workload_start: float | None = None,
     workload_end: float | None = None,
 ) -> dict[str, float]:
-    """Mean per numeric key across selected window_summary lines.
-
-    Merges ``metrics`` with scalar numeric ``host_features``. Optional workload
-    interval uses overlap with ``[workload_start, workload_end]``.
-    """
+    """Mean per numeric key across selected window_summary lines."""
     records = _iter_window_records(path)
     if workload_start is not None and workload_end is not None:
         records = [r for r in records if _window_overlaps_workload(r, workload_start, workload_end)]
@@ -104,50 +101,40 @@ def pairwise(
     *,
     include_psi_totals: bool,
 ) -> dict[str, object]:
-    keys = sorted(k for k in (set(a) & set(b)) if _include_metric_key(k, include_psi_totals=include_psi_totals))
-    metrics = []
-    for k in keys:
-        metrics.append(
-            {
-                "name": k,
-                f"{name_a}_mean": round(a[k], 6),
-                f"{name_b}_mean": round(b[k], 6),
-                "delta_percent": round(delta_percent(a[k], b[k]), 4),
-            }
-        )
-    return {
-        "base": name_a,
-        "other": name_b,
-        "metrics": metrics,
-    }
+    keys = sorted(
+        k for k in (set(a) & set(b))
+        if _include_metric_key(k, include_psi_totals=include_psi_totals)
+    )
+    metrics = [
+        {
+            "name": k,
+            f"{name_a}_mean": round(a[k], 6),
+            f"{name_b}_mean": round(b[k], 6),
+            "delta_percent": round(delta_percent(a[k], b[k]), 4),
+        }
+        for k in keys
+    ]
+    return {"base": name_a, "other": name_b, "metrics": metrics}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Pairwise mean deltas across three summary.jsonl runs (heuristic, noop, workload_only)."
+        description="Pairwise mean deltas across N summary.jsonl runs (any controller combination)."
     )
     parser.add_argument(
-        "summaries",
-        nargs=3,
-        metavar=("HEURISTIC", "NOOP", "WORKLOAD_ONLY"),
-        help="Paths to summary.jsonl for each mode.",
+        "runs",
+        nargs="+",
+        metavar="LABEL:PATH",
+        help="One or more label:path pairs, e.g. heuristic:data/runs/x/summary.jsonl workload_only:data/runs/y/summary.jsonl",
     )
-    parser.add_argument(
-        "--drop-first",
-        type=int,
-        default=0,
-        help="After filtering, drop the first N window lines per file.",
-    )
-    parser.add_argument(
-        "--drop-last",
-        type=int,
-        default=0,
-        help="After filtering, drop the last M window lines per file.",
-    )
+    parser.add_argument("--drop-first", type=int, default=0,
+                        help="After filtering, drop the first N window lines per file.")
+    parser.add_argument("--drop-last", type=int, default=0,
+                        help="After filtering, drop the last M window lines per file.")
     parser.add_argument(
         "--filter-workload-window",
         action="store_true",
-        help="Keep only windows overlapping workload_started_unix_s..workload_ended_unix_s from run_metadata.json next to each summary.",
+        help="Keep only windows overlapping workload_started_unix_s..workload_ended_unix_s from run_metadata.json.",
     )
     parser.add_argument(
         "--include-psi-totals",
@@ -156,11 +143,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    heur_path = Path(args.summaries[0])
-    noop_path = Path(args.summaries[1])
-    wo_path = Path(args.summaries[2])
+    parsed: list[tuple[str, Path]] = []
+    for entry in args.runs:
+        if ":" not in entry:
+            print(f"[scorecard] error: expected LABEL:PATH, got '{entry}'", file=sys.stderr)
+            return 2
+        label, _, path_str = entry.partition(":")
+        parsed.append((label.strip(), Path(path_str.strip())))
 
-    def means_for(path: Path) -> dict[str, float]:
+    if len(parsed) < 2:
+        print("[scorecard] error: need at least 2 LABEL:PATH runs for a pairwise comparison", file=sys.stderr)
+        return 2
+
+    def means_for(label: str, path: Path) -> dict[str, float]:
         ws: float | None = None
         we: float | None = None
         if args.filter_workload_window:
@@ -173,8 +168,8 @@ def main() -> int:
                     ws, we = None, None
             if ws is None or we is None:
                 print(
-                    f"[scorecard] warning: --filter-workload-window but missing timestamps in "
-                    f"{path.parent / 'run_metadata.json'}; using all windows for {path.name}",
+                    f"[scorecard] warning: --filter-workload-window but missing timestamps for "
+                    f"'{label}'; using all windows",
                     file=sys.stderr,
                 )
         return load_means(
@@ -185,25 +180,29 @@ def main() -> int:
             workload_end=we,
         )
 
-    heur = means_for(heur_path)
-    noop = means_for(noop_path)
-    wo = means_for(wo_path)
+    run_means = {label: means_for(label, path) for label, path in parsed}
+
+    labels = [label for label, _ in parsed]
+    comparisons = []
+    for i, base_label in enumerate(labels):
+        for other_label in labels[i + 1 :]:
+            comparisons.append(
+                pairwise(
+                    base_label, run_means[base_label],
+                    other_label, run_means[other_label],
+                    include_psi_totals=args.include_psi_totals,
+                )
+            )
 
     out: dict[str, Any] = {
-        "heuristic": str(heur_path),
-        "noop": str(noop_path),
-        "workload_only": str(wo_path),
+        "runs": {label: str(path) for label, path in parsed},
         "scorecard_options": {
             "drop_first": args.drop_first,
             "drop_last": args.drop_last,
             "filter_workload_window": bool(args.filter_workload_window),
             "include_psi_totals": bool(args.include_psi_totals),
         },
-        "comparisons": [
-            pairwise("heuristic", heur, "noop", noop, include_psi_totals=args.include_psi_totals),
-            pairwise("heuristic", heur, "workload_only", wo, include_psi_totals=args.include_psi_totals),
-            pairwise("noop", noop, "workload_only", wo, include_psi_totals=args.include_psi_totals),
-        ],
+        "comparisons": comparisons,
     }
     print(json.dumps(out, indent=2))
     return 0

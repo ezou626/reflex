@@ -564,25 +564,28 @@ def main() -> int:
             f"Workload classifier loaded: classes={classifier.known_classes()}",
             flush=True,
         )
+    composite_members: list = [
+        WorkloadAwareController(classifier, min_consecutive=3),
+        HeuristicProposalController(),
+        NoopProposalController(),
+    ]
+    if args.external_proposals is not None:
+        composite_members.append(ExternalJsonlProposalController(args.external_proposals))
     controller_factories = {
         "heuristic": HeuristicProposalController(),
         "noop": NoopProposalController(),
         "classifier": WorkloadAwareController(classifier, min_consecutive=3),
-        "external": ExternalJsonlProposalController(args.external_proposals),
-        "composite": CompositeProposalController([
-            WorkloadAwareController(classifier, min_consecutive=3),
-            HeuristicProposalController(),
-            NoopProposalController(),
-            ExternalJsonlProposalController(args.external_proposals),
-        ]),
+        "composite": CompositeProposalController(composite_members),
     }
+    if args.external_proposals is not None:
+        controller_factories["external"] = ExternalJsonlProposalController(args.external_proposals)
     controller_mode = args.controller_mode.strip().lower()
     if controller_mode not in controller_factories:
         available = ", ".join(sorted(controller_factories))
         raise SystemExit(
             f"Unknown --controller-mode '{args.controller_mode}'. Available: {available}"
         )
-    proposal_pipeline = controller_factories[controller_mode]()
+    proposal_pipeline = controller_factories[controller_mode]
     action_logger = ActionLogger(path=decision_log, run_id=run_id)
     should_decide_early = False
     _active_class: list[str | None] = [None]

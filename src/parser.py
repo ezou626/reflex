@@ -1,6 +1,5 @@
 import sys
 import struct
-import re
 import os
 import subprocess
 from bcc import syscall # can use bcc just for this, looks up architecture

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Median (and min/max) of pairwise metrics across multiple scorecard_three_way.json files."""
+"""Median (and min/max) of pairwise metrics across multiple scorecard_matrix.json files."""
 from __future__ import annotations
 
 import argparse
@@ -70,7 +70,7 @@ def aggregate_median(scorecard_paths: list[Path]) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Aggregate scorecard_three_way.json trials (median/min/max).")
+    parser = argparse.ArgumentParser(description="Aggregate scorecard_matrix.json trials (median/min/max).")
     parser.add_argument("-o", "--output", type=Path, help="Write aggregate JSON to this path.")
     parser.add_argument(
         "--json-stdout",
@@ -82,7 +82,7 @@ def main() -> int:
         nargs="+",
         type=Path,
         metavar="SCORECARD_JSON",
-        help="One or more scorecard_three_way.json files (same trial ordering).",
+        help="One or more scorecard_matrix.json files (same controller combination and trial ordering).",
     )
     args = parser.parse_args()
     out = aggregate_median([Path(p) for p in args.scorecards])

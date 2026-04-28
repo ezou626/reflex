@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +29,14 @@ def _fmt_num(x: Any, *, width: int = 10) -> str:
 
 
 def _abbr(mode: str) -> str:
-    if mode == "heuristic":
-        return "heur"
-    if mode == "workload_only":
-        return "work"
-    return mode[:4]
+    _known = {
+        "heuristic": "heur",
+        "workload_only": "work",
+        "classifier": "clsf",
+        "composite": "comp",
+        "external": "ext",
+    }
+    return _known.get(mode, mode[:6])
 
 
 def format_plain_scorecard(doc: dict[str, Any]) -> str:

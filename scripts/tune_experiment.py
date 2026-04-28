@@ -373,7 +373,7 @@ def cluster_and_save_library(
 
     library: dict[str, Any] = {}
     for c in range(best_k):
-        indices      = [i for i, l in enumerate(labels) if l == c]
+        indices      = [i for i, label in enumerate(labels) if label == c]
         cluster_exps = [experiments[i] for i in indices]
         centroid     = km.cluster_centers_[c].tolist()
         stressors    = [e.get("stressor", "") for e in cluster_exps]

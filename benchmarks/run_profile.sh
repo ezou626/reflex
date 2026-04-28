@@ -6,7 +6,7 @@ REPO_ROOT="${SCRIPT_DIR%/benchmarks}"
 cd "${REPO_ROOT}"
 
 PROFILE="${1:-cpu_bound}"
-MODE="${2:-noop}" # heuristic|noop|workload_only (legacy: tuned|baseline)
+MODE="${2:-heuristic}" # heuristic|noop|classifier|composite|workload_only (legacy: tuned|baseline)
 RUN_ID="${3:-profile-${PROFILE}-${MODE}-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="${REPO_ROOT}/data/runs/${RUN_ID}"
 POLICY_FILE="${REPO_ROOT}/configs/tuning_policy.yaml"
@@ -24,8 +24,11 @@ case "${MODE}" in
   baseline) MODE="noop" ;;
 esac
 
-if [[ "${MODE}" != "heuristic" && "${MODE}" != "noop" && "${MODE}" != "workload_only" ]]; then
-  echo "error: mode must be heuristic|noop|workload_only (or legacy tuned|baseline)" >&2
+valid_modes=("heuristic" "noop" "classifier" "composite" "external" "workload_only")
+valid=0
+for m in "${valid_modes[@]}"; do [[ "${MODE}" == "$m" ]] && valid=1 && break; done
+if [[ $valid -eq 0 ]]; then
+  echo "error: mode must be one of: ${valid_modes[*]} (or legacy tuned|baseline)" >&2
   exit 1
 fi
 
