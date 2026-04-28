@@ -644,7 +644,6 @@ def main() -> int:
             window_id = action_logger.next_window_id()
 
             if controller_mode == "classifier":
-                action_logger.log_measurement(window_id, summary)
                 proposals = proposal_pipeline.propose(
                     summary, history.latest(20), registry=tuner_registry
                 )

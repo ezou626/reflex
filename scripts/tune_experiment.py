@@ -53,10 +53,23 @@ from sklearn.metrics import silhouette_score
 from skopt import Optimizer
 from skopt.space import Integer
 
+import yaml
+
 from config.loaders import load_tuner_catalog
 from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_REWARD_CONFIG = REPO_ROOT / "configs" / "reward_weights.yaml"
+
+
+def load_reward_weights(path: Path) -> dict[str, float]:
+    with path.open(encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    keys = {"mem_avail", "rq_latency", "direct_reclaim", "cpu_busy", "dirty"}
+    missing = keys - raw.keys()
+    if missing:
+        raise ValueError(f"reward_weights.yaml missing keys: {missing}")
+    return {k: float(raw[k]) for k in keys}
 
 JOINT_TUNER_IDS = [
     # memory reclaim
@@ -251,20 +264,20 @@ def metrics_to_feature_vec(summary: dict[str, Any]) -> list[float]:
     return [min(_get_val(summary, k) / norm, 1.0) for k, norm in _FEATURE_MAP]
 
 
-def compute_absolute_reward(summary: dict[str, Any]) -> float:
+def compute_absolute_reward(summary: dict[str, Any], weights: dict[str, float]) -> float:
     """Scalar reward from an averaged daemon summary. Higher is better."""
-    rq_lat  = min(_get_val(summary, "rq_latency_p95_us")           / 10_000.0, 1.0)
-    dr_rate = min(_get_val(summary, "direct_reclaim_rate_per_sec") / 100.0,    1.0)
-    cpu     = min(_get_val(summary, "host_cpu_busy_ratio"),                     1.0)
-    dirty   = min(_get_val(summary, "host_dirty_kb")               / 200_000.0, 1.0)
+    rq_lat    = min(_get_val(summary, "rq_latency_p95_us")           / 10_000.0, 1.0)
+    dr_rate   = min(_get_val(summary, "direct_reclaim_rate_per_sec") / 100.0,    1.0)
+    cpu       = min(_get_val(summary, "host_cpu_busy_ratio"),                     1.0)
+    dirty     = min(_get_val(summary, "host_dirty_kb")               / 200_000.0, 1.0)
     mem_avail = _get_val(summary, "host_mem_available_ratio")
 
     return round(
-        0.35 * mem_avail
-        - 0.30 * rq_lat
-        - 0.20 * dr_rate
-        - 0.10 * cpu
-        - 0.05 * dirty,
+        weights["mem_avail"]       * mem_avail
+        + weights["rq_latency"]    * rq_lat
+        + weights["direct_reclaim"]* dr_rate
+        + weights["cpu_busy"]      * cpu
+        + weights["dirty"]         * dirty,
         6,
     )
 
@@ -449,11 +462,13 @@ class ExperimentRunner:
         duration_s: float,
         warmup_s: float,
         dry_run: bool,
+        reward_weights: dict[str, float],
     ) -> None:
-        self.stressor_cmd  = stressor_cmd
-        self.duration      = duration_s
-        self.warmup        = warmup_s
-        self.dry_run       = dry_run
+        self.stressor_cmd   = stressor_cmd
+        self.duration       = duration_s
+        self.warmup         = warmup_s
+        self.dry_run        = dry_run
+        self.reward_weights = reward_weights
 
         key = _stressor_key(stressor_cmd)
         self.model_path = model_dir / f"gp_{key}.pkl"
@@ -578,7 +593,7 @@ class ExperimentRunner:
 
         self.restore_baseline()
 
-        reward = compute_absolute_reward(summary)
+        reward = compute_absolute_reward(summary, self.reward_weights)
         self.opt.tell(config, -reward)
 
         if reward > self.best_reward:
@@ -675,6 +690,10 @@ def main() -> int:
         help="Skip k-means clustering at the end (use when more workloads follow)",
     )
     parser.add_argument(
+        "--reward-config", type=Path, default=DEFAULT_REWARD_CONFIG,
+        help="YAML file with reward weights (default: configs/reward_weights.yaml)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Skip sysctl writes, stressor, and daemon; useful for testing the loop",
     )
@@ -694,6 +713,9 @@ def main() -> int:
         print(f"error: stressor binary not found: {binary}", file=sys.stderr)
         return 1
 
+    reward_weights = load_reward_weights(args.reward_config)
+    print(f"Reward weights: {reward_weights}")
+
     runner = ExperimentRunner(
         catalog_path=args.catalog,
         model_dir=args.model_dir,
@@ -701,6 +723,7 @@ def main() -> int:
         duration_s=args.duration,
         warmup_s=args.warmup,
         dry_run=args.dry_run,
+        reward_weights=reward_weights,
     )
 
     experiments_path = args.model_dir / "experiments.jsonl"

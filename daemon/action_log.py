@@ -27,19 +27,6 @@ class ActionLogger:
         self._window_id += 1
         return self._window_id
 
-    def log_measurement(self, window_id: int, summary: dict[str, Any]) -> None:
-        self._write({
-            "record_type": "measurement",
-            "run_id": self.run_id,
-            "window_id": window_id,
-            "timestamp": round(time.time(), 6),
-            "metrics": summary.get("metrics", {}),
-            "host_features": {
-                k: v for k, v in summary.get("host_features", {}).items()
-                if k not in ("sysctl_baseline_at_start", "boot_kernel_params")
-            },
-        })
-
     def log_cluster_switch(
         self,
         window_id: int,
