@@ -39,6 +39,8 @@ from control import (
     ExternalJsonlProposalController,
     HeuristicProposalController,
     NoopProposalController,
+    WorkloadAwareController,
+    WorkloadClassifier,
 )
 from decision_engine import DecisionEngine
 from history import WindowHistory
@@ -62,20 +64,24 @@ class _Ev:
          self.ts_ns, self.value_i32, self.value_u32, self.comm) = fields
 
 
-EVENT_EXEC = 1
-EVENT_FORK = 2
-EVENT_EXIT = 3
-EVENT_SCHED_SWITCH = 4
-EVENT_SYSCALL_EXIT = 5
-EVENT_RQ_LATENCY = 6
+EVENT_EXEC           = 1
+EVENT_FORK           = 2
+EVENT_EXIT           = 3
+EVENT_SCHED_SWITCH   = 4
+EVENT_SYSCALL_EXIT   = 5
+EVENT_RQ_LATENCY     = 6
+EVENT_DIRECT_RECLAIM = 7
+EVENT_BLK_LATENCY    = 8
 
 EVENT_NAME = {
-    EVENT_EXEC: "exec",
-    EVENT_FORK: "fork",
-    EVENT_EXIT: "exit",
-    EVENT_SCHED_SWITCH: "sched_switch",
-    EVENT_SYSCALL_EXIT: "sys_exit",
-    EVENT_RQ_LATENCY: "rq_latency",
+    EVENT_EXEC:           "exec",
+    EVENT_FORK:           "fork",
+    EVENT_EXIT:           "exit",
+    EVENT_SCHED_SWITCH:   "sched_switch",
+    EVENT_SYSCALL_EXIT:   "sys_exit",
+    EVENT_RQ_LATENCY:     "rq_latency",
+    EVENT_DIRECT_RECLAIM: "direct_reclaim",
+    EVENT_BLK_LATENCY:    "blk_latency",
 }
 
 PHASE1_METRIC_CONTRACTS: dict[str, dict[str, Any]] = {
@@ -195,6 +201,8 @@ class WindowState:
     syscall_error_count: int = 0
     syscall_top_counts: dict[int, int] = field(default_factory=dict)
     rq_latency_samples_us: list[int] = field(default_factory=list)
+    direct_reclaim_samples_us: list[int] = field(default_factory=list)
+    blk_latency_samples_us: list[int] = field(default_factory=list)
 
     def add_event(self, event: dict[str, Any]) -> None:
         name = event["event_name"]
@@ -207,6 +215,10 @@ class WindowState:
             self.syscall_top_counts[sid] = self.syscall_top_counts.get(sid, 0) + 1
         elif name == "rq_latency":
             self.rq_latency_samples_us.append(int(event["rq_latency_us"]))
+        elif name == "direct_reclaim":
+            self.direct_reclaim_samples_us.append(int(event["reclaim_lat_us"]))
+        elif name == "blk_latency":
+            self.blk_latency_samples_us.append(int(event["blk_lat_us"]))
 
 
 @dataclass
@@ -331,6 +343,10 @@ def _to_event_dict(ev: Any) -> dict[str, Any]:
         base["is_error"] = int(ev.value_i32) < 0
     elif event_type == EVENT_RQ_LATENCY:
         base["rq_latency_us"] = int(ev.value_u32)
+    elif event_type == EVENT_DIRECT_RECLAIM:
+        base["reclaim_lat_us"] = int(ev.value_u32)
+    elif event_type == EVENT_BLK_LATENCY:
+        base["blk_lat_us"] = int(ev.value_u32)
     return base
 
 
@@ -386,6 +402,13 @@ def _build_summary(
             "rq_latency_p95_us": _quantile(window.rq_latency_samples_us, 0.95),
             "rq_latency_p99_us": _quantile(window.rq_latency_samples_us, 0.99),
             "rq_latency_count": len(window.rq_latency_samples_us),
+            "direct_reclaim_rate_per_sec": round(
+                len(window.direct_reclaim_samples_us) / window_sec, 3
+            ),
+            "direct_reclaim_lat_p95_us": _quantile(window.direct_reclaim_samples_us, 0.95),
+            "blk_latency_p50_us": _quantile(window.blk_latency_samples_us, 0.50),
+            "blk_latency_p95_us": _quantile(window.blk_latency_samples_us, 0.95),
+            "blk_latency_count": len(window.blk_latency_samples_us),
         },
         "event_counts": window.event_counts,
         "top_syscalls": [
@@ -493,12 +516,21 @@ def main() -> int:
         help="Cgroup IDs to whitelist for syscall filtering (from run.sh). Omit to monitor all.",
     )
     parser.add_argument(
+        "--classify-only",
+        action="store_true",
+        help="Suppress all output except workload class switch messages.",
+    )
+    parser.add_argument(
         "--event-trigger-threshold",
         type=int,
         default=8000,
         help="Trigger an early decision tick if window event volume exceeds this.",
     )
     args = parser.parse_args()
+
+    _real_stdout = sys.stdout
+    if args.classify_only:
+        sys.stdout = open(os.devnull, "w")
 
     run_id = args.run_id or _default_run_id()
     run_dir = args.run_dir or _default_run_dir(run_id)
@@ -526,31 +558,42 @@ def main() -> int:
         run_dir / "applied_stack.json", max_tracked=policy.max_tracked_applies
     )
     stack.load()
+    classifier = WorkloadClassifier.from_model_dir(_repo_root() / "models")
+    if classifier.is_loaded():
+        print(
+            f"Workload classifier loaded: classes={classifier.known_classes()}",
+            flush=True,
+        )
     controller_factories = {
-        "heuristic": HeuristicProposalController,
-        "noop": NoopProposalController,
+        "heuristic": HeuristicProposalController(),
+        "noop": NoopProposalController(),
+        "classifier": WorkloadAwareController(classifier, min_consecutive=3),
+        "external": ExternalJsonlProposalController(args.external_proposals),
+        "composite": CompositeProposalController([
+            WorkloadAwareController(classifier, min_consecutive=3),
+            HeuristicProposalController(),
+            NoopProposalController(),
+            ExternalJsonlProposalController(args.external_proposals),
+        ]),
     }
-    proposal_controllers: list = []
     controller_mode = args.controller_mode.strip().lower()
-    if controller_mode in controller_factories:
-        proposal_controllers.append(controller_factories[controller_mode]())
-    else:
+    if controller_mode not in controller_factories:
         available = ", ".join(sorted(controller_factories))
         raise SystemExit(
             f"Unknown --controller-mode '{args.controller_mode}'. Available: {available}"
         )
-
-    if args.external_proposals is not None:
-        proposal_controllers.append(
-            ExternalJsonlProposalController(args.external_proposals)
-        )
-    proposal_pipeline = CompositeProposalController(proposal_controllers)
+    proposal_pipeline = controller_factories[controller_mode]()
     action_logger = ActionLogger(path=decision_log, run_id=run_id)
     should_decide_early = False
+    _active_class: list[str | None] = [None]
 
     loader_args = ["sudo", "./build/loader", str(os.getpid())]
     loader_args += [str(c) for c in (args.cgroup_ids or [])]
-    loader_proc = subprocess.Popen(loader_args, stdout=subprocess.PIPE)
+    loader_proc = subprocess.Popen(
+        loader_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL if args.classify_only else None,
+    )
     ev_queue: queue.Queue[_Ev] = queue.Queue()
 
     def _reader() -> None:
@@ -613,6 +656,17 @@ def main() -> int:
             )
             batch_index = 0
             for chosen in decision.chosen_actions:
+                if chosen.action_id == "workload_class_config":
+                    new_class = chosen.metadata.get("workload_class")
+                    prev_class = _active_class[0]
+                    if new_class and new_class != prev_class:
+                        prev_str = prev_class if prev_class else "unclassified"
+                        print(
+                            f"cluster {new_class} detected: configs switched from {prev_str} -> {new_class}",
+                            file=_real_stdout,
+                            flush=True,
+                        )
+                        _active_class[0] = new_class
                 tuner = tuner_registry.get(chosen.tuner_id)
                 if tuner is None:
                     batch_index += 1

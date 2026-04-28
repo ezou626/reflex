@@ -52,6 +52,9 @@ class TunerCatalogEntry:
     default_cmdline_value: str | None = None
     enabled: bool = True
     tags: list[str] = field(default_factory=list)
+    min_value: int | float | None = None
+    max_value: int | float | None = None
+    step: int | float = 1
 
 
 @dataclass

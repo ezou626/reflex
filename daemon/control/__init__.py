@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control.ml_controller import BOProposalController
 from control.proposal_controller import (
     CompositeProposalController,
     ExternalJsonlProposalController,
@@ -7,11 +8,15 @@ from control.proposal_controller import (
     NoopProposalController,
     ProposalController,
 )
+from control.workload_classifier import WorkloadAwareController, WorkloadClassifier
 
 __all__ = [
+    "BOProposalController",
     "CompositeProposalController",
     "ExternalJsonlProposalController",
     "HeuristicProposalController",
     "NoopProposalController",
     "ProposalController",
+    "WorkloadAwareController",
+    "WorkloadClassifier",
 ]
