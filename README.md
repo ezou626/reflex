@@ -9,7 +9,8 @@
 - **Key directories**
   - `TODO.md` – backlog for **extra host / benchmark metrics** (implemented vs planned).
   - `ebpf/` – eBPF programs (e.g. MVP ring buffer)
-  - `daemon/` – userspace daemon (`main.py` for the MVP collector)
+  - `daemon_core/` – async daemon orchestration framework
+  - `implementations/` – runnable daemon_core programs and local assets
   - `scripts/` – `setup_dev_env.sh`, `test_mvp_qemu.sh`, etc.
   - `src/reflex/` – Python package stub for uv
   - `external/KernMLOps/` – optional reference submodule
@@ -24,14 +25,14 @@
     - syscall error rate (`raw_syscalls:sys_exit`)
     - wakeup->oncpu latency (`sched_wakeup` + `sched_switch`)
   - Run from repo root:
-    - `sudo uv run python daemon/main.py`
-    - `sudo uv run python daemon/main.py -o /tmp/events.jsonl --summary-output /tmp/summary.jsonl`
+    - `sudo uv run python -m implementations.main heuristic`
+    - `sudo uv run python -m implementations.main classifier`
     - Optional: `--timeout-ms 200 --window-sec 1.0 --proc-sample-sec 1.0`
   - Stop with **Ctrl+C**.
   - Outputs:
     - Raw events JSONL (`data/mvp_events.jsonl` by default)
     - Window summaries JSONL (`data/mvp_summary.jsonl` by default)
-  - **Alternative without uv:** `sudo python3 daemon/main.py` (same args) if **`python3-bpfcc`** is installed on the system interpreter.
+  - Feature contracts and ML-oriented schema live in `configs/features_schema.yaml`.
   - Feature contracts and ML-oriented schema live in `configs/features_schema.yaml`.
   - Additional source catalog (for future collectors) lives in `docs/metrics_catalog.md`.
 

@@ -5,7 +5,7 @@ from typing import Any
 from daemon_core.tuners import TunerAction, TunerRegistry
 from daemon_core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path
 from daemon_core.types import AggregatorSample, ControllerRunContext
-from implementations.executors import TunerActionExecutor
+from implementations.executors import BatchTunerExecutor
 
 
 def _summary_from_sample(sample: AggregatorSample) -> dict[str, Any] | None:
@@ -146,13 +146,14 @@ class HeuristicController:
             "heuristic proposal pass complete",
             {"actions": len(actions), "trigger_reason": ctx.trigger.reason},
         )
-        for action in sorted(actions, key=lambda a: a.priority, reverse=True):
+        sorted_actions = sorted(actions, key=lambda a: a.priority, reverse=True)
+        if sorted_actions:
             await ctx.enqueue_executor(
-                TunerActionExecutor(self.registry, action),
+                BatchTunerExecutor(self.registry, sorted_actions),
                 {
                     "controller": "heuristic",
-                    "tuner_id": action.tuner_id,
-                    "action_id": action.action_id,
-                    "priority": action.priority,
+                    "action_count": len(sorted_actions),
+                    "priority": sorted_actions[0].priority,
+                    "tuner_ids": [action.tuner_id for action in sorted_actions],
                 },
             )

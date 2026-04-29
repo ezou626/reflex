@@ -38,6 +38,26 @@ def _daemon_help(configs: dict[str, ModuleType]) -> str:
     return "\n".join(lines)
 
 
+def _add_common_args(parser: argparse.ArgumentParser, root: Path) -> None:
+    parser.add_argument(
+        "--loader-binary",
+        type=Path,
+        default=root / "implementations" / "ebpf" / "build" / "reflex",
+        help="Path to the implementation-local loader binary.",
+    )
+    parser.add_argument(
+        "--tuner-catalog",
+        type=Path,
+        default=root / "configs" / "tuner_catalog.yaml",
+        help="Path to the tuner catalog.",
+    )
+    parser.add_argument("--window-sec", type=float, default=1.0)
+    parser.add_argument("--cgroup-id", action="append", type=int, default=[])
+    parser.add_argument("--sample-queue-size", type=int, default=1024)
+    parser.add_argument("--controller-queue-size", type=int, default=128)
+    parser.add_argument("--executor-queue-size", type=int, default=128)
+
+
 async def _run(args: argparse.Namespace, config: ModuleType) -> None:
     daemon = config.create_daemon(args)
     runtime = Runtime(daemon)
@@ -57,36 +77,29 @@ def main() -> int:
         epilog=_daemon_help(configs),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "daemon_id",
-        nargs="?",
-        default=next(iter(configs), ""),
-        choices=tuple(configs) if configs else None,
-        help="Daemon config id to run.",
-    )
-    parser.add_argument(
-        "--loader-binary",
-        type=Path,
-        default=root / "implementations" / "ebpf" / "build" / "reflex",
-        help="Path to the implementation-local loader binary.",
-    )
-    parser.add_argument(
-        "--tuner-catalog",
-        type=Path,
-        default=root / "configs" / "tuner_catalog.yaml",
-        help="Path to the tuner catalog.",
-    )
-    parser.add_argument("--window-sec", type=float, default=1.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-sudo", action="store_true")
-    parser.add_argument("--cgroup-id", action="append", type=int, default=[])
-    parser.add_argument("--sample-queue-size", type=int, default=1024)
-    parser.add_argument("--controller-queue-size", type=int, default=128)
-    parser.add_argument("--executor-queue-size", type=int, default=128)
+    subparsers = parser.add_subparsers(
+        dest="daemon_id",
+        metavar="daemon_id",
+        required=True,
+    )
+
+    for daemon_id, config in configs.items():
+        desc = getattr(config, "DESCRIPTION", "")
+        subparser = subparsers.add_parser(
+            daemon_id,
+            description=desc,
+            help=desc,
+        )
+        _add_common_args(subparser, root)
+        configure_parser = getattr(config, "configure_parser", None)
+        if callable(configure_parser):
+            configure_parser(subparser)
+        subparser.set_defaults(config=config)
+
     args = parser.parse_args()
-    if args.daemon_id not in configs:
-        parser.error("no daemon configs found")
-    asyncio.run(_run(args, configs[args.daemon_id]))
+    asyncio.run(_run(args, args.config))
     return 0
 
 

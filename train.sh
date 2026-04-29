@@ -27,8 +27,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 TUNER="${SCRIPT_DIR}/tune_experiment.py"
-EXPERIMENTS_PATH="${REPO_ROOT}/implementations/controllers/bo/models/experiments.jsonl"
-LIBRARY_PATH="${REPO_ROOT}/models/library.json"
+EXPERIMENTS_PATH="${REPO_ROOT}/implementations/controllers/workload_classifier/models/experiments.jsonl"
+CLASSIFIER_MODEL_DIR="${REPO_ROOT}/implementations/controllers/workload_classifier/models"
+LIBRARY_PATH="${CLASSIFIER_MODEL_DIR}/library.json"
 
 NCPU=$(nproc)
 
@@ -71,7 +72,7 @@ while getopts "n:d:w:s:l:rxh" opt; do
         s) SETTLE="$OPTARG" ;;
         l) WORKLOAD_FILTER="$OPTARG" ;;
         x) DRY_RUN_FLAG="--dry-run" ;;
-        r) rm -f "$EXPERIMENTS_PATH" "$LIBRARY_PATH" "${REPO_ROOT}/models/gp_"*.pkl ;;
+        r) rm -f "$EXPERIMENTS_PATH" "$LIBRARY_PATH" "${CLASSIFIER_MODEL_DIR}/gp_"*.pkl ;;
         h) sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) exit 1 ;;
     esac

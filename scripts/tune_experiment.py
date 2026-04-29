@@ -11,9 +11,11 @@ sessions; the system figures out which programs produce similar system signature
 and assigns each group an optimal config.
 
 All experiments are appended to
-implementations/controllers/bo/models/experiments.jsonl across sessions.
+implementations/controllers/workload_classifier/models/experiments.jsonl across
+sessions.
 After each run, k-means clusters all collected feature vectors and writes
-models/library.json — the file WorkloadClassifier reads at runtime.
+implementations/controllers/workload_classifier/models/library.json — the file
+WorkloadClassifier reads at runtime.
 
 Usage (must run as root):
     sudo uv run python scripts/tune_experiment.py \\
@@ -61,7 +63,15 @@ from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_EXPERIMENTS_PATH = (
-    REPO_ROOT / "implementations" / "controllers" / "bo" / "models" / "experiments.jsonl"
+    REPO_ROOT
+    / "implementations"
+    / "controllers"
+    / "workload_classifier"
+    / "models"
+    / "experiments.jsonl"
+)
+DEFAULT_CLASSIFIER_MODEL_DIR = (
+    REPO_ROOT / "implementations" / "controllers" / "workload_classifier" / "models"
 )
 DEFAULT_REWARD_CONFIG = REPO_ROOT / "configs" / "reward_weights.yaml"
 
@@ -89,7 +99,7 @@ JOINT_TUNER_IDS = [
 ]
 
 # Feature space for clustering. Must stay in sync with
-# _FEATURE_MAP in daemon/control/workload_classifier.py.
+# _FEATURE_MAP in implementations/controllers/workload_classifier/__init__.py.
 # Keys are looked up from daemon summary["metrics"] or summary["host_features"].
 _FEATURE_MAP: list[tuple[str, float]] = [
     ("rq_latency_p95_us",           10_000.0),
@@ -678,14 +688,17 @@ def main() -> int:
         help="Seconds between experiments for memory to settle (default: 8)",
     )
     parser.add_argument(
-        "--model-dir", type=Path, default=REPO_ROOT / "models",
-        help="Directory for GP models and library (default: models/)",
+        "--model-dir", type=Path, default=DEFAULT_CLASSIFIER_MODEL_DIR,
+        help=(
+            "Directory for GP models and classifier library "
+            "(default: implementations/controllers/workload_classifier/models/)"
+        ),
     )
     parser.add_argument(
         "--experiments-path", type=Path, default=DEFAULT_EXPERIMENTS_PATH,
         help=(
             "JSONL path for BO training observations "
-            "(default: implementations/controllers/bo/models/experiments.jsonl)"
+            "(default: implementations/controllers/workload_classifier/models/experiments.jsonl)"
         ),
     )
     parser.add_argument(

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Minimal BO tuner: load tuners → spawn loader.c → run GP loop.
+Minimal GP tuner: load daemon_core tuners, spawn the implementation-local
+loader, and run a controlled experiment loop.
 
 Loop per iteration:
     ask GP → write sysctls → measure N seconds of loader payloads → tell GP
@@ -9,9 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import struct
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -19,25 +18,27 @@ import numpy as np
 from skopt import Optimizer
 from skopt.space import Integer
 
+from daemon_core.tuners.loaders import load_tuner_catalog
+from daemon_core.tuners.schema import TunerCatalogEntry
+from daemon_core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path, write_sysctl
+from implementations.aggregators.current_payload import _PAYLOAD_SIZE, decode_payload
+
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "daemon"))
-
-from config.loaders import load_tuner_catalog  # noqa: E402
-from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path  # noqa: E402
-
-LOADER       = REPO / "build" / "loader"
-CATALOG      = REPO / "configs" / "tuner_catalog.yaml"
-EXPERIMENTS  = REPO / "models" / "experiments.jsonl"
-
-# struct payload from src/loader.c: tid u32, pid u32, syscall_id u64,
-# cgroup_id u64, ret_val i64, dur_ns u64  — packed
-PAYLOAD_FMT  = "=IIQQqQ"
-PAYLOAD_SIZE = struct.calcsize(PAYLOAD_FMT)
+LOADER = REPO / "implementations" / "ebpf" / "build" / "reflex"
+CATALOG = REPO / "configs" / "tuner_catalog.yaml"
+EXPERIMENTS = (
+    REPO
+    / "implementations"
+    / "controllers"
+    / "workload_classifier"
+    / "models"
+    / "experiments.jsonl"
+)
 
 
-def load_tuners():
+def load_tuners(catalog_path: Path) -> list[TunerCatalogEntry]:
     """Enabled runtime_sysctl int knobs with bounds — these are our search dims."""
-    cat = load_tuner_catalog(CATALOG)
+    cat = load_tuner_catalog(catalog_path)
     return [
         e for e in cat.tuners
         if e.enabled and e.scope == "runtime_sysctl" and e.kind == "int"
@@ -58,22 +59,31 @@ def _psi_some_avg10(resource: str) -> float:
     return 0.0
 
 
-def measure(loader: subprocess.Popen, seconds: float) -> dict[str, float]:
+def measure(loader: subprocess.Popen[bytes], seconds: float) -> dict[str, float]:
     """Drain loader payloads for `seconds`; return metrics for the reward function."""
     deadline = time.time() + seconds
-    durs: list[int] = []
+    rq_latency_us: list[int] = []
+    blk_latency_us: list[int] = []
     fails = 0
+    syscalls = 0
     psi_mem = _psi_some_avg10("memory")
     psi_io  = _psi_some_avg10("io")
     psi_cpu = _psi_some_avg10("cpu")
     t0 = time.time()
     while time.time() < deadline:
-        buf = loader.stdout.read(PAYLOAD_SIZE)
-        if not buf or len(buf) < PAYLOAD_SIZE:
+        if loader.stdout is None:
             break
-        _, _, _, _, ret_val, dur_ns = struct.unpack(PAYLOAD_FMT, buf)
-        durs.append(dur_ns)
-        if ret_val < 0:
+        buf = loader.stdout.read(_PAYLOAD_SIZE)
+        if not buf or len(buf) < _PAYLOAD_SIZE:
+            break
+        event = decode_payload(buf)
+        if event["event_name"] == "rq_latency":
+            rq_latency_us.append(int(event["rq_latency_us"]))
+        elif event["event_name"] == "blk_latency":
+            blk_latency_us.append(int(event["blk_lat_us"]))
+        elif event["event_name"] == "sys_exit":
+            syscalls += 1
+        if event.get("is_error", False):
             fails += 1
     elapsed = max(time.time() - t0, 1e-6)
     # Average PSI across the window: pre + post / 2 is good enough for a noisy signal.
@@ -81,8 +91,11 @@ def measure(loader: subprocess.Popen, seconds: float) -> dict[str, float]:
     psi_io  = (psi_io  + _psi_some_avg10("io"))     / 2.0
     psi_cpu = (psi_cpu + _psi_some_avg10("cpu"))    / 2.0
     return {
-        "p95_latency": float(np.percentile(durs, 95)) if durs else 0.0,
-        "throughput":  len(durs) / elapsed,
+        "p95_latency": float(np.percentile(rq_latency_us, 95)) if rq_latency_us else 0.0,
+        "blk_p95_latency": (
+            float(np.percentile(blk_latency_us, 95)) if blk_latency_us else 0.0
+        ),
+        "throughput":  syscalls / elapsed,
         "mem":         psi_mem,
         "io":          psi_io,
         "cpu":         psi_cpu,
@@ -108,21 +121,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--experiments", type=int, default=20)
     ap.add_argument("--duration", type=float, default=10.0)
+    ap.add_argument("--loader", type=Path, default=LOADER)
+    ap.add_argument("--catalog", type=Path, default=CATALOG)
+    ap.add_argument("--experiments-path", type=Path, default=EXPERIMENTS)
     args = ap.parse_args()
 
-    tuners   = load_tuners()
-    space    = [Integer(int(t.min_value), int(t.max_value), name=t.id) for t in tuners] # to feed into the scikit learn optimizer
+    tuners   = load_tuners(args.catalog)
+    space    = [Integer(int(t.min_value), int(t.max_value), name=t.id) for t in tuners]
     baseline = {t.id: int(read_sysctl(sysctl_name_to_path(t.sysctl), t.kind)) for t in tuners}
 
     opt = Optimizer(space, base_estimator="GP", acq_func="EI",
                     n_initial_points=5, random_state=42)
 
     # Loader is the eBPF metric source — spawn once and keep it running.
-    loader = subprocess.Popen([str(LOADER), str(0)], stdout=subprocess.PIPE)
+    loader = subprocess.Popen([str(args.loader), str(0)], stdout=subprocess.PIPE)
 
     # Append-mode JSONL: every experiment becomes one line for cross-session analysis.
-    EXPERIMENTS.parent.mkdir(parents=True, exist_ok=True)
-    series = EXPERIMENTS.open("a", encoding="utf-8", buffering=1)
+    args.experiments_path.parent.mkdir(parents=True, exist_ok=True)
+    series = args.experiments_path.open("a", encoding="utf-8", buffering=1)
 
     try:
         # Baseline pass with default sysctls — reward is computed as a ratio against this.

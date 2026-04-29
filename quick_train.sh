@@ -3,7 +3,7 @@ set -euo pipefail
 
 while getopts "r" opt; do
     case $opt in
-        r) rm -f /home/ubuntu/reflex/implementations/controllers/bo/models/experiments.jsonl /home/ubuntu/reflex/models/library.json /home/ubuntu/reflex/models/gp_*.pkl ;;
+        r) rm -f /home/ubuntu/reflex/implementations/controllers/workload_classifier/models/experiments.jsonl /home/ubuntu/reflex/implementations/controllers/workload_classifier/models/library.json /home/ubuntu/reflex/implementations/controllers/workload_classifier/models/gp_*.pkl ;;
     esac
 done
 
@@ -25,5 +25,5 @@ sys.path.insert(0, '/home/ubuntu/reflex/daemon')
 sys.path.insert(0, '/home/ubuntu/reflex/scripts')
 from tune_experiment import cluster_and_save_library
 from pathlib import Path
-cluster_and_save_library(Path('/home/ubuntu/reflex/implementations/controllers/bo/models/experiments.jsonl'), Path('/home/ubuntu/reflex/models/library.json'), catalog_path=Path('/home/ubuntu/reflex/configs/tuner_catalog.yaml'), max_k=5)
+cluster_and_save_library(Path('/home/ubuntu/reflex/implementations/controllers/workload_classifier/models/experiments.jsonl'), Path('/home/ubuntu/reflex/implementations/controllers/workload_classifier/models/library.json'), catalog_path=Path('/home/ubuntu/reflex/configs/tuner_catalog.yaml'), max_k=5)
 "
