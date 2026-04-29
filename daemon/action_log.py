@@ -23,6 +23,35 @@ class ActionLogger:
     def _write(self, payload: dict[str, Any]) -> None:
         self._handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
+    def next_window_id(self) -> int:
+        self._window_id += 1
+        return self._window_id
+
+    def log_cluster_switch(
+        self,
+        window_id: int,
+        from_class: str | None,
+        to_class: str,
+        changes: list[AppliedAction],
+    ) -> None:
+        self._write({
+            "record_type": "cluster_switch",
+            "run_id": self.run_id,
+            "window_id": window_id,
+            "timestamp": round(time.time(), 6),
+            "from_class": from_class if from_class else "unclassified",
+            "to_class": to_class,
+            "tuner_changes": [
+                {
+                    "tuner_id": a.action.tuner_id,
+                    "target": a.action.target,
+                    "value": a.action.value,
+                    "previous_value": a.previous_value,
+                }
+                for a in changes
+            ],
+        })
+
     def log_decision(
         self,
         trigger: str,
@@ -30,7 +59,6 @@ class ActionLogger:
         summary: dict[str, Any],
         comparison_delta: dict[str, float] | None,
     ) -> int:
-        self._window_id += 1
         chosen_list = [
             {
                 "tuner_id": a.tuner_id,

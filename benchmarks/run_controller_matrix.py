@@ -270,6 +270,26 @@ def _import_scorecard_trials_aggregate(repo_root: Path) -> Any:
     return mod
 
 
+def _run_bench_compare(
+    repo_root: Path,
+    runs: dict[str, Path],
+    output_path: Path,
+) -> Path | None:
+    _ensure_benchmarks_on_path(repo_root)
+    import bench_compare as bc  # noqa: PLC0415
+
+    label_dirs = list(runs.items())
+    if not label_dirs:
+        return None
+    baseline = label_dirs[0][0]
+    doc = bc.compare(label_dirs, baseline)
+    output_path.write_text(
+        __import__("json").dumps(doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run workload against controller matrix.")
     parser.add_argument("--profile", default="cpu_bound", help="Profile name from configs/profiles.yaml.")
@@ -479,9 +499,15 @@ def main() -> int:
 
         if args.trials > 1 and batch_dir is not None:
             score_out = batch_dir / f"scorecard_matrix_trial_{trial_idx}.json"
+            bench_out = batch_dir / f"bench_compare_trial_{trial_idx}.json"
         else:
             score_out = run_root / f"{args.run_prefix}-{args.profile}-scorecard-{ts}.json"
+            bench_out = run_root / f"{args.run_prefix}-{args.profile}-bench_compare-{ts}.json"
         score_path = _run_matrix_scorecard(repo_root, runs, scorecard_flags, output_path=score_out)
+
+        bench_path = _run_bench_compare(repo_root, runs, output_path=bench_out)
+        if bench_path:
+            print(f"[matrix] wrote bench comparison: {bench_path}")
 
         if score_path:
             trial_scorecards.append(score_path)
@@ -495,6 +521,7 @@ def main() -> int:
                     "modes": {k: str(v) for k, v in runs.items()},
                     "scorecard": str(score_path),
                     "scorecard_compact": str(_tcp),
+                    **({"bench_compare": str(bench_path)} if bench_path else {}),
                 }
             )
         last_runs = runs

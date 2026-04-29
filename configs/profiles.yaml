@@ -35,3 +35,11 @@ profiles:
     command: stress-ng --cpu 1 --vm 1 --vm-bytes 20% --timeout 30 --metrics-brief
     duration_sec: 30
     warmup_sec: 5
+  unixbench:
+    command: /home/ubuntu/byte-unixbench/UnixBench/Run -i 1 dhry2reg whetstone-double
+    duration_sec: 30
+    warmup_sec: 0
+  lebench:
+    command: /home/ubuntu/LEBench/leb
+    duration_sec: 120
+    warmup_sec: 0

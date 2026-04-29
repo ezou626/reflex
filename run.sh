@@ -64,9 +64,9 @@ fi
 TESTER_PIDS=()
 CGROUP_DIRS=()
 
-rm -f /tmp/reflex_cgroups
-touch /tmp/reflex_cgroups
-chmod 666 /tmp/reflex_cgroups
+sudo rm -f /tmp/reflex_cgroups
+sudo touch /tmp/reflex_cgroups
+sudo chmod 666 /tmp/reflex_cgroups
 
 cleanup() {
     for pid in "${TESTER_PIDS[@]}"; do

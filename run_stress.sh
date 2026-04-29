@@ -12,3 +12,4 @@ sudo ./stressor.sh "sysbench memory --memory-block-size=1M --memory-total-size=9
 sleep 10
 echo "All stressors launched"
 # to kill 
+# test

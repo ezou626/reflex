@@ -499,8 +499,8 @@ def main() -> int:
     parser.add_argument(
         "--controller-mode",
         type=str,
-        default="heuristic",
-        help="Proposal controller mode for decision candidates (e.g. heuristic, noop).",
+        default="classifier",
+        help="Proposal controller mode for decision candidates (e.g. classifier, heuristic, composite, noop).",
     )
     parser.add_argument(
         "--external-proposals",
@@ -641,6 +641,36 @@ def main() -> int:
         def decision_tick(trigger: str, summary: dict[str, Any]) -> None:
             summary = _inject_run_baselines(summary, sysctl_baseline, boot_params)
             history.add(summary)
+            window_id = action_logger.next_window_id()
+
+            if controller_mode == "classifier":
+                proposals = proposal_pipeline.propose(
+                    summary, history.latest(20), registry=tuner_registry
+                )
+                if not proposals:
+                    return
+                new_class = proposals[0].metadata.get("workload_class")
+                prev_class = _active_class[0]
+                changes: list[AppliedAction] = []
+                for action in proposals:
+                    tuner = tuner_registry.get(action.tuner_id)
+                    if tuner is None:
+                        continue
+                    try:
+                        changes.append(tuner.apply(action, dry_run=args.dry_run))
+                    except OSError:
+                        pass
+                if changes and new_class:
+                    action_logger.log_cluster_switch(window_id, prev_class, new_class, changes)
+                    prev_str = prev_class if prev_class else "unclassified"
+                    print(
+                        f"cluster {new_class} detected: configs switched from {prev_str} -> {new_class}",
+                        file=_real_stdout,
+                        flush=True,
+                    )
+                    _active_class[0] = new_class
+                return
+
             comparison = history.compare_last_two(policy.compare_metrics)
             proposals = proposal_pipeline.propose(
                 summary, history.latest(20), registry=tuner_registry
@@ -651,7 +681,7 @@ def main() -> int:
                 history=history.latest(20),
                 proposals=proposals,
             )
-            window_id = action_logger.log_decision(
+            action_logger.log_decision(
                 trigger=trigger,
                 decision=decision,
                 summary=summary,
@@ -659,17 +689,6 @@ def main() -> int:
             )
             batch_index = 0
             for chosen in decision.chosen_actions:
-                if chosen.action_id == "workload_class_config":
-                    new_class = chosen.metadata.get("workload_class")
-                    prev_class = _active_class[0]
-                    if new_class and new_class != prev_class:
-                        prev_str = prev_class if prev_class else "unclassified"
-                        print(
-                            f"cluster {new_class} detected: configs switched from {prev_str} -> {new_class}",
-                            file=_real_stdout,
-                            flush=True,
-                        )
-                        _active_class[0] = new_class
                 tuner = tuner_registry.get(chosen.tuner_id)
                 if tuner is None:
                     batch_index += 1
