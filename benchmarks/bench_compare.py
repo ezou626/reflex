@@ -62,8 +62,8 @@ def _print_unixbench_table(
                 all_subtests.append(k)
 
     base_idx = labels.index(baseline_label) if baseline_label in labels else 0
-    header = f"{'subtest':<42}" + "".join(f"{l[:10]:>12}" for l in labels) + "".join(
-        f"  d%_vs_{labels[base_idx][:6]}" for l in labels if l != labels[base_idx]
+    header = f"{'subtest':<42}" + "".join(f"{label[:10]:>12}" for label in labels) + "".join(
+        f"  d%_vs_{labels[base_idx][:6]}" for label in labels if label != labels[base_idx]
     )
     print("UnixBench Index Scores")
     print("=" * len(header))
@@ -99,8 +99,8 @@ def _print_lebench_table(
                 all_syscalls.append(k)
 
     base_idx = labels.index(baseline_label) if baseline_label in labels else 0
-    header = f"{'syscall':<24}" + "".join(f"{l[:12]:>14}" for l in labels) + "".join(
-        f"  d%_vs_{labels[base_idx][:6]}" for l in labels if l != labels[base_idx]
+    header = f"{'syscall':<24}" + "".join(f"{label[:12]:>14}" for label in labels) + "".join(
+        f"  d%_vs_{labels[base_idx][:6]}" for label in labels if label != labels[base_idx]
     )
     print("LEBench Latencies (usec/call) — lower is better")
     print("=" * len(header))

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Minimal BO tuner: load tuners → spawn loader.c → run GP loop.
+Minimal GP tuner: load daemon_core tuners, spawn the implementation-local
+loader, and run a controlled experiment loop.
 
 Loop per iteration:
     ask GP → write sysctls → measure N seconds of loader payloads → tell GP
@@ -22,6 +23,11 @@ from pathlib import Path
 import numpy as np
 from skopt import Optimizer
 from skopt.space import Integer
+
+from daemon_core.tuners.loaders import load_tuner_catalog
+from daemon_core.tuners.schema import TunerCatalogEntry
+from daemon_core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path, write_sysctl
+from implementations.aggregators.current_payload import _PAYLOAD_SIZE, decode_payload
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "daemon"))
@@ -48,7 +54,7 @@ def make_cgroup() -> tuple[Path, int]:
 
 def load_tuners():
     """Enabled runtime_sysctl int knobs with bounds — these are our search dims."""
-    cat = load_tuner_catalog(CATALOG)
+    cat = load_tuner_catalog(catalog_path)
     return [
         e for e in cat.tuners
         if e.enabled and e.scope == "runtime_sysctl" and e.kind == "int"
@@ -141,6 +147,9 @@ def main() -> int:
                     help='Workload command, e.g. --stressor "stress-ng --vm 2 --vm-bytes 75%"')
     ap.add_argument("--experiments", type=int, default=20)
     ap.add_argument("--duration", type=float, default=10.0)
+    ap.add_argument("--loader", type=Path, default=LOADER)
+    ap.add_argument("--catalog", type=Path, default=CATALOG)
+    ap.add_argument("--experiments-path", type=Path, default=EXPERIMENTS)
     args = ap.parse_args()
 
     stressor_cmd = shlex.split(args.stressor)
@@ -166,8 +175,8 @@ def main() -> int:
     ev_q   = start_reader(loader)
 
     # Append-mode JSONL: every experiment becomes one line for cross-session analysis.
-    EXPERIMENTS.parent.mkdir(parents=True, exist_ok=True)
-    series = EXPERIMENTS.open("a", encoding="utf-8", buffering=1)
+    args.experiments_path.parent.mkdir(parents=True, exist_ok=True)
+    series = args.experiments_path.open("a", encoding="utf-8", buffering=1)
 
     try:
         # Baseline pass with default sysctls — reward is computed as a ratio against this.

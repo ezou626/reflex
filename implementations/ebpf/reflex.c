@@ -9,7 +9,7 @@
 #define CGROUP_FILE    "/tmp/reflex_cgroups"
 #define MAX_CGROUP_IDS 256
 
-static struct collector_bpf *g_skel   = NULL;
+static struct reflex_bpf *g_skel   = NULL;
 static uint64_t loaded_cgids[MAX_CGROUP_IDS];
 static int      n_loaded               = 0;
 static time_t   last_mtime             = 0;
@@ -75,7 +75,7 @@ int main(int argc, char **argv){
         fprintf(stderr, "Py_pid %u\n", py_pid);
     }
 
-    struct collector_bpf *skel;
+    struct reflex_bpf *skel;
     struct ring_buffer *rb = NULL;
     int err;
 
@@ -85,7 +85,7 @@ int main(int argc, char **argv){
     };
     setrlimit(RLIMIT_MEMLOCK, &rlim); // not sure purpose of this
 
-    skel = collector_bpf__open();
+    skel = reflex_bpf__open();
     if (!skel) {
         fprintf(stderr, "Error with open\n");
         return 1;
@@ -96,7 +96,7 @@ int main(int argc, char **argv){
     skel->rodata->python_pid = py_pid;
     skel->rodata->use_cgroup_filter = (argc > 2 || access(CGROUP_FILE, F_OK) == 0) ? 1 : 0;
 
-    err = collector_bpf__load(skel);
+    err = reflex_bpf__load(skel);
     if (err) {
         fprintf(stderr, "Failed to load skel %d", err);
         goto cleanup;
@@ -107,7 +107,7 @@ int main(int argc, char **argv){
 
     check_cgroup_file(); // pick up any IDs already in the file before attach
 
-    err = collector_bpf__attach(skel);
+    err = reflex_bpf__attach(skel);
     if (err) {
         fprintf(stderr, "Error with attach%d\n", err);
         goto cleanup;
@@ -127,7 +127,7 @@ int main(int argc, char **argv){
 cleanup:
     fprintf(stderr, "Cleanup\n");
     ring_buffer__free(rb);
-    collector_bpf__destroy(skel);
+    reflex_bpf__destroy(skel);
     return 0;
 
     // const char* filename = "collector.bpf.o"; // improve this

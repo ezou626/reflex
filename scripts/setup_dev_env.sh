@@ -40,20 +40,26 @@ COMMON_PKGS=(
   qemu-system-x86
 )
 
-# Kernel-specific tooling
+# Kernel-specific tooling is best effort. Some hosts, especially Debian hosts
+# running cloud/custom kernels, do not expose linux-headers-$(uname -r) through
+# the configured apt repositories. That should not block QEMU guest benchmarks.
 UNAME_REL="$(uname -r)"
-KERNEL_PKGS=()
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${COMMON_PKGS[@]}"
 
 if printf '%s\n' "$UNAME_REL" | grep -qi 'microsoft'; then
-  # WSL2 kernels typically don't have versioned linux-headers/linux-tools
-  echo "[reflex] Detected WSL kernel (${UNAME_REL}); using generic linux-headers/linux-tools packages."
-  KERNEL_PKGS+=(linux-headers-generic linux-tools-common linux-tools-generic)
+  echo "[reflex] Detected WSL kernel (${UNAME_REL}); trying generic kernel tools."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    linux-headers-generic linux-tools-common linux-tools-generic || true
 else
-  # Stock Ubuntu kernels should have matching versioned packages
-  KERNEL_PKGS+=(linux-headers-"${UNAME_REL}" linux-tools-common linux-tools-"${UNAME_REL}")
+  if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    linux-headers-"${UNAME_REL}" linux-tools-common linux-tools-"${UNAME_REL}"; then
+    echo "[reflex] Warning: matching kernel headers/tools unavailable for ${UNAME_REL}." >&2
+    echo "[reflex] Continuing; QEMU benchmarks install guest kernel tooling inside the VM." >&2
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      linux-tools-common linux-tools-generic 2>/dev/null || true
+  fi
 fi
-
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${COMMON_PKGS[@]}" "${KERNEL_PKGS[@]}"
 
 # bpftool and perf are provided by linux-tools-* packages for the running kernel
 if ! command -v bpftool >/dev/null 2>&1; then
@@ -73,5 +79,5 @@ echo "[reflex] Setup complete. Next steps:"
 echo "  - Ensure \"$HOME/.local/bin\" is in your PATH for uv commands."
 echo "  - Initialize optional reference submodule (KernMLOps):"
 echo "      git submodule update --init external/KernMLOps"
-echo "  - Run the MVP ring-buffer collector (needs root for eBPF load):"
-echo "      sudo uv run python daemon/main.py"
+echo "  - Run the QEMU UnixBench comparison:"
+echo "      benchmarks/unixbench_qemu.sh"

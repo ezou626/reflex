@@ -5,8 +5,8 @@ Please ensure you are running a ubuntu VM with root access (recommend QEMU, can 
 This project aims to follow a multi-step approach, combining work from KConfigTune and KernTune to create a pre-trained workload-optimized tuning setup for Linux,
 which is then applied in real time based on clustering to fit the fingerprint of the current running workload.
 
-Training can be launched with the `train.sh` script, the repo contains our base model in `models/library.json` (which can be used directly without training). Running the training script
-provides an `-r` flag to reset the model and use entirely new training workloads. Training observations accumulate in `implementations/controllers/bo/models/experiments.jsonl`.
+Training can be launched with the `train.sh` script, the repo contains our base model in `implementations/controllers/workload_classifier/models/library.json` (which can be used directly without training). Running the training script
+provides an `-r` flag to reset the model and use entirely new training workloads. Training observations accumulate in `implementations/controllers/workload_classifier/models/experiments.jsonl`.
 
 Workloads can individually be trained with `sudo uv run python scripts/tune_experiment.py` on a given workload, or by running the train script which can do several predefined workloads in succession.
 

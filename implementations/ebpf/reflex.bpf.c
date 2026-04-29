@@ -16,7 +16,7 @@ volatile const __u8  use_cgroup_filter = 0;
 
 /* Unified event payload — layout is naturally 48 bytes, no padding needed.
  * value_i32/value_u32 are event-specific (see event type constants below).
- * Matches what daemon/main.py expects via struct.unpack. */
+ * Matches the userspace loader payload decoder. */
 #define EVENT_EXEC           1
 #define EVENT_FORK           2
 #define EVENT_EXIT           3
