@@ -6,17 +6,21 @@ required. It creates a NoCloud seed ISO with PowerShell, boots QEMU with WHPX,
 copies the repo into the guest over SSH, and runs benchmarks/unixbench_compare.sh.
 
 Run from the repo root:
-  powershell -ExecutionPolicy Bypass -File benchmarks\unixbench_qemu_windows.ps1
+  powershell -ExecutionPolicy Bypass -File benchmarks\unixbench_qemu_windows.ps1 `
+      -Modes "workload_only,heuristic,classifier" -Full
+
+NOTE: Quote the -Modes value. In powershell.exe -File mode, unquoted commas split
+into separate positional arguments and cause parameter binding errors.
 
 Useful parameters:
-  -Modes workload_only,heuristic
+  -Modes "workload_only,heuristic"   (quoted, comma-separated)
   -SshPort 52223
   -DiskGB 32
 #>
 
 [CmdletBinding()]
 param(
-    [string]$Modes = "workload_only,heuristic,classifier",
+    [string]$Modes = "",
     [int]$SshPort = 52222,
     [int]$DiskGB = 24,
     [int]$MemoryMB = 4096,
@@ -24,10 +28,16 @@ param(
     [string]$CacheDir = "",
     [string]$UbuntuImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
     [string]$UnixBenchUrl = "https://github.com/kdlucas/byte-unixbench.git",
-    [switch]$KeepVm
+    [switch]$KeepVm,
+    [switch]$Full,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Modes)) {
+    throw "-Modes is required. Pass a quoted comma-separated list, e.g.: -Modes `"workload_only,heuristic,classifier`""
+}
 
 function Write-Step {
     param([string]$Message)
@@ -319,9 +329,11 @@ if [[ ! -x "$UNIXBENCH_DIR/UnixBench/Run" ]]; then
   git clone --depth 1 "__UNIXBENCH_URL__" "$UNIXBENCH_DIR"
 fi
 
-UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" MODES="__MODES__" bash benchmarks/unixbench_compare.sh
+UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" bash benchmarks/unixbench_compare.sh --modes "__MODES__" __SUITE__ __DRYRUN__
 '@
-    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes)
+    $suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
+    $dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
+    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg)
     $guestScript = $guestScript -replace "`r", ""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
     Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_unixbench.sh && bash /home/ubuntu/run_reflex_unixbench.sh"

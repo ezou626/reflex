@@ -19,12 +19,47 @@ EOF
 fi
 UNIXBENCH_DIR="$(cd "$(dirname "${UNIXBENCH}")" && pwd)"
 UNIXBENCH_BIN="./$(basename "${UNIXBENCH}")"
-BENCH_ARGS=(-i 1 dhry2reg whetstone-double)
+
+FAST=1
+DRY_RUN=0
+MODES_CSV="${MODES:-}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --fast)       FAST=1 ;;
+        --full)       FAST=0 ;;
+        --dry-run)    DRY_RUN=1 ;;
+        --modes)      MODES_CSV="$2"; shift ;;
+        --modes=*)    MODES_CSV="${1#--modes=}" ;;
+        *) echo "unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+if [[ -z "$MODES_CSV" ]]; then
+    echo "error: --modes is required (e.g. --modes workload_only,heuristic,classifier)" >&2
+    exit 1
+fi
+
+if [[ "$FAST" == "1" ]]; then
+    BENCH_ARGS=(-i 1 dhry2reg whetstone-double)
+else
+    BENCH_ARGS=(-i 3)
+fi
+
 BENCH_CMD="cd ${UNIXBENCH_DIR} && ${UNIXBENCH_BIN} ${BENCH_ARGS[*]}"
 OUT="${OUT:-${REPO}/data/unixbench_results.csv}"
 RUN_ROOT="${RUN_ROOT:-${REPO}/data/runs/unixbench-$(date +%Y%m%d-%H%M%S)}"
-MODES_CSV="${MODES:-workload_only,heuristic,classifier}"
 IFS=',' read -r -a MODES <<< "${MODES_CSV}"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+    EXPANDED=()
+    for m in "${MODES[@]}"; do
+        EXPANDED+=("$m")
+        [[ "$m" != "workload_only" ]] && EXPANDED+=("${m}_dry")
+    done
+    MODES=("${EXPANDED[@]}")
+fi
 UV_BIN="$(command -v uv || true)"
 if [[ -z "${UV_BIN}" ]]; then
     echo "error: uv not found on PATH" >&2
@@ -52,6 +87,14 @@ run_bench() {
     mkdir -p "$run_dir"
     log="$run_dir/workload.log"
 
+    # Strip _dry suffix to get the real implementation name
+    local impl_mode="$mode"
+    local dry_flag=()
+    if [[ "$mode" == *_dry ]]; then
+        impl_mode="${mode%_dry}"
+        dry_flag=(--dry-run)
+    fi
+
     echo "[*] Running mode: $mode" >&2
 
     # Clean cgroup file
@@ -59,7 +102,7 @@ run_bench() {
     sudo touch /tmp/reflex_cgroups
     sudo chmod 666 /tmp/reflex_cgroups
 
-    if [[ "$mode" == "workload_only" ]]; then
+    if [[ "$impl_mode" == "workload_only" ]]; then
         run_unixbench "$log"
         printf '{"mode":"%s","run_dir":"%s","bench_cmd":"%s"}\n' \
             "$mode" "$run_dir" "$BENCH_CMD" > "$run_dir/run_metadata.json"
@@ -76,7 +119,8 @@ run_bench() {
             --no-sudo \
             --run-id "unixbench-$mode" \
             --run-dir "$run_dir" \
-            "$mode" \
+            "${dry_flag[@]}" \
+            "$impl_mode" \
             --cgroup-id "$cgid" \
             > "$run_dir/daemon.log" 2>&1 &
         local dpid=$!
