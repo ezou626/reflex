@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import json
 import pkgutil
 import signal
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from daemon_core import Runtime
 import implementations.daemons as daemon_configs
@@ -60,6 +63,33 @@ def _add_common_args(parser: argparse.ArgumentParser, root: Path) -> None:
 
 async def _run(args: argparse.Namespace, config: ModuleType) -> None:
     daemon = config.create_daemon(args)
+    if args.run_dir is not None:
+        run_dir = args.run_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "run_id": args.run_id,
+            "daemon_id": args.daemon_id,
+            "run_dir": str(run_dir),
+            "dry_run": args.dry_run,
+            "no_sudo": args.no_sudo,
+            "loader_binary": str(args.loader_binary),
+            "tuner_catalog": str(args.tuner_catalog),
+            "window_sec": args.window_sec,
+            "cgroup_id": args.cgroup_id,
+        }
+        (run_dir / "run_metadata.json").write_text(
+            json.dumps(metadata, indent=2, default=str),
+            encoding="utf-8",
+        )
+        original_on_stop = daemon.on_stop
+
+        async def write_artifacts(runtime: Runtime) -> None:
+            if original_on_stop is not None:
+                await original_on_stop(runtime)
+            _write_jsonl(run_dir / "events.jsonl", runtime.events)
+            _write_jsonl(run_dir / "execution_results.jsonl", runtime.execution_results)
+
+        daemon.on_stop = write_artifacts
     runtime = Runtime(daemon)
 
     loop = asyncio.get_running_loop()
@@ -67,6 +97,20 @@ async def _run(args: argparse.Namespace, config: ModuleType) -> None:
         loop.add_signal_handler(sig, lambda: asyncio.create_task(runtime.stop()))
 
     await runtime.run()
+
+
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _write_jsonl(path: Path, records: list[Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, default=_jsonable) + "\n")
 
 
 def main() -> int:
@@ -79,6 +123,13 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-sudo", action="store_true")
+    parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Directory for daemon events, execution results, and run metadata.",
+    )
     subparsers = parser.add_subparsers(
         dest="daemon_id",
         metavar="daemon_id",
