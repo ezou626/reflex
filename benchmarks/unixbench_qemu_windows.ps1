@@ -6,28 +6,40 @@ required. It creates a NoCloud seed ISO with PowerShell, boots QEMU with WHPX,
 copies the repo into the guest over SSH, and runs benchmarks/unixbench_compare.sh.
 
 Run from the repo root:
-  powershell -ExecutionPolicy Bypass -File benchmarks\unixbench_qemu_windows.ps1
+  powershell -ExecutionPolicy Bypass -File benchmarks\unixbench_qemu_windows.ps1 `
+      -Modes "workload_only,heuristic,classifier" -Full
+
+NOTE: Quote the -Modes value. In powershell.exe -File mode, unquoted commas split
+into separate positional arguments and cause parameter binding errors.
 
 Useful parameters:
-  -Modes workload_only,heuristic
+  -Modes "workload_only,heuristic"   (quoted, comma-separated)
   -SshPort 52223
   -DiskGB 32
+    -OpenAIApiKey "<key>"              (optional; defaults to host OPENAI_API_KEY or .env)
 #>
 
 [CmdletBinding()]
 param(
-    [string]$Modes = "workload_only,heuristic,classifier",
+    [string]$Modes = "",
     [int]$SshPort = 52222,
     [int]$DiskGB = 24,
     [int]$MemoryMB = 4096,
     [int]$Cpus = 2,
     [string]$CacheDir = "",
+    [string]$OpenAIApiKey = "",
     [string]$UbuntuImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
     [string]$UnixBenchUrl = "https://github.com/kdlucas/byte-unixbench.git",
-    [switch]$KeepVm
+    [switch]$KeepVm,
+    [switch]$Full,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Modes)) {
+    throw "-Modes is required. Pass a quoted comma-separated list, e.g.: -Modes `"workload_only,heuristic,classifier`""
+}
 
 function Write-Step {
     param([string]$Message)
@@ -41,6 +53,41 @@ function Resolve-CommandPath {
         if ($cmd) {
             return $cmd.Source
         }
+    }
+    return $null
+}
+
+function Get-DotEnvValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+    foreach ($rawLine in Get-Content $Path) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
+            continue
+        }
+        if ($line -match '^\s*export\s+') {
+            $line = $line -replace '^\s*export\s+', ''
+        }
+        $parts = $line.Split("=", 2)
+        if ($parts.Count -ne 2) {
+            continue
+        }
+        $key = $parts[0].Trim()
+        if ($key -ne $Name) {
+            continue
+        }
+        $value = $parts[1].Trim()
+        if ($value.Length -ge 2) {
+            if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"'))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+        return $value
     }
     return $null
 }
@@ -78,14 +125,23 @@ function Wait-ForSsh {
         [int]$Port
     )
     for ($i = 0; $i -lt 120; $i++) {
-        & ssh -i $KeyPath -p $Port `
+        $ErrorActionPreference = "SilentlyContinue"
+        $out = & ssh -vv `
+            -i $KeyPath `
+            -p $Port `
             -o StrictHostKeyChecking=accept-new `
             -o UserKnownHostsFile="$KnownHosts" `
             -o ConnectTimeout=5 `
             -o BatchMode=yes `
-            ubuntu@127.0.0.1 "echo ok" *> $null
+            ubuntu@127.0.0.1 "echo ok" 2>&1
+        $ErrorActionPreference = "Stop"
         if ($LASTEXITCODE -eq 0) {
+            Write-Step "SSH ready"
             return
+        }
+        if ($i % 6 -eq 0) {
+            Write-Host "SSH attempt $i failed:"
+            $out | Select-Object -Last 12 | ForEach-Object { Write-Host "  $_" }
         }
         Start-Sleep -Seconds 5
     }
@@ -106,6 +162,17 @@ function Invoke-Guest {
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
+
+if ([string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+    $OpenAIApiKey = $env:OPENAI_API_KEY
+}
+if ([string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+    $dotEnvPath = Join-Path $repoRoot ".env"
+    $OpenAIApiKey = Get-DotEnvValue -Path $dotEnvPath -Name "OPENAI_API_KEY"
+    if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+        Write-Step "Loaded OPENAI_API_KEY from .env"
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($CacheDir)) {
     $CacheDir = Join-Path $repoRoot "data\qemu-windows"
@@ -146,6 +213,8 @@ if (-not (Test-Path $Key)) {
         throw "ssh-keygen failed"
     }
 }
+# Windows OpenSSH refuses to sign with world-readable private keys
+icacls $Key /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
 if (-not (Test-Path $baseImg)) {
     Write-Step "Downloading Ubuntu cloud image"
@@ -155,42 +224,90 @@ if (-not (Test-Path $baseImg)) {
 
 Write-Step "Creating cloud-init seed ISO"
 New-Item -ItemType Directory -Force -Path $seedDir | Out-Null
-$pubLine = Get-Content -Raw $pub
-@"
-instance-id: reflex-win-unixbench-$PID
+$pubLine = (Get-Content -Raw $pub).Trim()
+[System.IO.File]::WriteAllText(
+    (Join-Path $seedDir "meta-data"),
+    @"
+instance-id: iid-reflex-win-unixbench-$PID
 local-hostname: reflex-win-unixbench
-"@ | Set-Content -Encoding ascii (Join-Path $seedDir "meta-data")
-@"
+"@,
+    (New-Object System.Text.UTF8Encoding($false))
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $seedDir "user-data"),
+    @"
 #cloud-config
-package_update: false
-growpart:
-  mode: auto
-  devices: ["/"]
-  ignore_growroot_disabled: false
-resize_rootfs: true
+users:
+  - default
+
 ssh_authorized_keys:
   - $pubLine
-"@ | Set-Content -Encoding ascii (Join-Path $seedDir "user-data")
-Write-SeedIso -IsoPath $seedIso -SourceDir $seedDir
+"@,
+    (New-Object System.Text.UTF8Encoding($false))
+)
+$mkisofs = Resolve-CommandPath @("mkisofs.exe", "genisoimage.exe", "xorriso.exe", "oscdimg.exe")
+if ($mkisofs) {
+    if ((Split-Path $mkisofs -Leaf) -ieq "oscdimg.exe") {
+        & $mkisofs -o -m -l $seedDir $seedIso
+    } elseif ((Split-Path $mkisofs -Leaf) -ieq "xorriso.exe") {
+        & $mkisofs -as mkisofs -output $seedIso -volid cidata -joliet -rock $seedDir
+    } else {
+        & $mkisofs -output $seedIso -volid cidata -joliet -rock $seedDir
+    }
+    if ($LASTEXITCODE -ne 0) { throw "seed ISO creation failed" }
+} elseif (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
+    $wslUserData = (wsl wslpath -u $seedDir.Replace('\', '/')) + "/user-data"
+    $wslMetaData = (wsl wslpath -u $seedDir.Replace('\', '/')) + "/meta-data"
+    $wslIso      = wsl wslpath -u $seedIso.Replace('\', '/')
+    $hasCloudLocalds = (wsl which cloud-localds 2>$null).Trim()
+    $hasGenisoimage  = (wsl which genisoimage  2>$null).Trim()
+    if ($hasCloudLocalds) {
+        wsl cloud-localds $wslIso $wslUserData $wslMetaData
+    } elseif ($hasGenisoimage) {
+        $wslDir = wsl wslpath -u $seedDir.Replace('\', '/')
+        wsl genisoimage -output $wslIso -volid cidata -joliet -rock $wslDir
+    } else {
+        throw "WSL found but neither cloud-localds nor genisoimage available. Run: wsl sudo apt-get install cloud-image-utils"
+    }
+    if ($LASTEXITCODE -ne 0) { throw "seed ISO creation failed (WSL)" }
+} else {
+    throw "No ISO creation tool found. Install mkisofs/genisoimage/xorriso/oscdimg, or enable WSL with genisoimage."
+}
 
 Write-Step "Creating VM overlay"
 & $qemuImg create -f qcow2 -F qcow2 -b (Resolve-Path $baseImg) $overlay | Out-Host
 & $qemuImg resize $overlay "${DiskGB}G" | Out-Host
 
+Write-Step "Boosting power plan for benchmark"
+powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 1
+powercfg -setactive SCHEME_CURRENT
+
 Write-Step "Starting QEMU on 127.0.0.1:$SshPort"
 $qemuArgs = @(
     "-machine", "type=q35,accel=whpx",
-    "-cpu", "max",
+    "-smbios", "type=1,serial=ds=nocloud",
+    "-cpu", "qemu64",
     "-smp", "$Cpus",
     "-m", "$MemoryMB",
     "-display", "none",
     "-serial", "file:$consoleLog",
     "-drive", "file=$overlay,if=virtio,cache=writeback",
-    "-drive", "file=$seedIso,if=virtio,format=raw",
+    "-cdrom", "$seedIso",
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:$SshPort-:22",
-    "-device", "virtio-net-pci,netdev=net0"
+    "-device", "e1000,netdev=net0"
 )
 $qemuProc = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -RedirectStandardError $qemuLog -PassThru -WindowStyle Hidden
+try {
+    # Prefer the highest practical priority for benchmark stability.
+    $qemuProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::RealTime
+} catch {
+    try {
+        $qemuProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+    } catch {
+        Write-Step "Warning: Could not raise QEMU process priority."
+    }
+}
+$qemuProc.ProcessorAffinity = [IntPtr]0xFF  # P-cores; adjust mask as needed
 
 try {
     New-Item -ItemType File -Force -Path $KnownHosts | Out-Null
@@ -198,15 +315,11 @@ try {
     Wait-ForSsh -KeyPath $Key -Port $SshPort
 
     Write-Step "Preparing repo archive"
-    if (Test-Path $repoZip) {
-        Remove-Item -Force $repoZip
-    }
-    $exclude = @("\.git\", "\.venv\", "\data\qemu", "\data\qemu-windows", "\__pycache__\")
-    $files = Get-ChildItem -Path $repoRoot -Recurse -File | Where-Object {
-        $full = $_.FullName
-        -not ($exclude | Where-Object { $full -like "*$_*" })
-    }
-    Compress-Archive -Path $files.FullName -DestinationPath $repoZip -Force
+    if (Test-Path $repoZip) { Remove-Item -Force $repoZip }
+    $wslRoot = (wsl wslpath -u ($repoRoot.ToString().Replace('\', '/'))).Trim()
+    $wslZip  = (wsl wslpath -u ($repoZip.Replace('\', '/'))).Trim()
+    wsl bash -c "cd '$wslRoot' && zip -r -q '$wslZip' . --exclude './.git/*' --exclude './.venv/*' --exclude './data/qemu-windows/*' --exclude './data/qemu/*' --exclude './__pycache__/*' --exclude './.worktrees/*'"
+    if ($LASTEXITCODE -ne 0) { throw "repo zip creation failed" }
 
     Write-Step "Copying repo archive to guest"
     & scp -i $Key -P $SshPort `
@@ -218,9 +331,20 @@ try {
     }
 
     Write-Step "Running guest setup and UnixBench comparison"
+    $openAiExportLine = ""
+    if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+        # Avoid brittle quote escaping by passing the key as base64 and decoding in guest.
+        $keyBytes = [Text.Encoding]::UTF8.GetBytes($OpenAIApiKey)
+        $keyB64 = [Convert]::ToBase64String($keyBytes)
+        $openAiExportLine = "export OPENAI_API_KEY=`$(printf '%s' '$keyB64' | base64 -d)"
+    } else {
+        Write-Step "OPENAI_API_KEY not provided; OpenAI controller runs will no-op."
+    }
+
     $guestScript = @'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+__OPENAI_API_KEY_EXPORT__
 
 wait_for_apt() {
   if command -v cloud-init >/dev/null 2>&1; then
@@ -256,7 +380,8 @@ fi
 
 rm -rf /home/ubuntu/reflex
 mkdir -p /home/ubuntu/reflex
-unzip -q /home/ubuntu/reflex.zip -d /home/ubuntu/reflex
+unzip -q -o /home/ubuntu/reflex.zip -d /home/ubuntu/reflex
+find /home/ubuntu/reflex -name "*.sh" -exec sed -i 's/\r//' {} +
 cd /home/ubuntu/reflex
 uv venv --system-site-packages --allow-existing
 uv sync
@@ -269,6 +394,7 @@ if [[ -z "$BPFTOOL_BIN" ]]; then
   echo "error: bpftool not found" >&2
   exit 1
 fi
+"$BPFTOOL_BIN" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
 make -C implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 
 UNIXBENCH_DIR="$HOME/byte-unixbench"
@@ -277,9 +403,12 @@ if [[ ! -x "$UNIXBENCH_DIR/UnixBench/Run" ]]; then
   git clone --depth 1 "__UNIXBENCH_URL__" "$UNIXBENCH_DIR"
 fi
 
-UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" MODES="__MODES__" bash benchmarks/unixbench_compare.sh
+UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" bash benchmarks/unixbench_compare.sh --modes "__MODES__" __SUITE__ __DRYRUN__
 '@
-    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes)
+    $suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
+    $dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
+    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg).Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
+    $guestScript = $guestScript -replace "`r", ""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
     Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_unixbench.sh && bash /home/ubuntu/run_reflex_unixbench.sh"
 
@@ -317,4 +446,11 @@ finally {
     } else {
         Write-Step "Keeping VM artifacts in $CacheDir"
     }
+    # sweep stale artifacts from aborted or old runs (keeps base image and SSH key)
+    Get-ChildItem $CacheDir -File | Where-Object {
+        $_.Name -match '^(unixbench-|reflex-|known_hosts\.)' -and
+        $_.FullName -notin @($Key, $pub)
+    } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem $CacheDir -Directory | Where-Object { $_.Name -match '^seed-' } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -27,6 +27,9 @@
   - Run from repo root:
     - `sudo uv run python -m implementations.main heuristic`
     - `sudo uv run python -m implementations.main classifier`
+    - `sudo uv run python -m implementations.main hillclimb --dry-run`
+    - `sudo uv run python -m implementations.main bandit --dry-run`
+    - `sudo uv run python -m implementations.main openai --dry-run`
     - Optional: `--timeout-ms 200 --window-sec 1.0 --proc-sample-sec 1.0`
   - Stop with **Ctrl+C**.
   - Outputs:

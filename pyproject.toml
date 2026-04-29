@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 ml = ["torch"]
 dev = ["pytest>=8.0"]
+openai = ["openai>=1.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
