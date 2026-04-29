@@ -7,7 +7,10 @@ from typing import Any
 from daemon_core.tuners import AppliedAction, TunerAction
 from implementations.aggregators import decode_payload
 from implementations.controllers import (
+    ContextualBanditController,
     HeuristicController,
+    HillClimbController,
+    OpenAITuningController,
     WorkloadClassifier,
     WorkloadClassifierController,
 )
@@ -34,7 +37,10 @@ class FakeRegistry:
 
 
 def test_reflex_implementation_imports() -> None:
+    assert ContextualBanditController is not None
     assert HeuristicController is not None
+    assert HillClimbController is not None
+    assert OpenAITuningController is not None
     assert WorkloadClassifier is not None
     assert WorkloadClassifierController is not None
     assert BatchTunerExecutor is not None
@@ -51,7 +57,7 @@ def test_current_payload_decoder_exec_event() -> None:
 
 def test_reflex_main_discovers_daemon_configs() -> None:
     configs = _load_daemon_configs()
-    assert set(configs) >= {"heuristic", "classifier"}
+    assert set(configs) >= {"heuristic", "classifier", "openai", "hillclimb", "bandit"}
     assert "bo" not in configs
 
 

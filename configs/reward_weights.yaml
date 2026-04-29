@@ -1,8 +1,28 @@
-# Reward weights for tune_experiment.py.
-# Each weight is applied to a normalized [0, 1] value.
-# Positive = more is better; negative = less is better.
-mem_avail:       0.35   # host_mem_available_ratio
-rq_latency:     -0.30   # rq_latency_p95_us / 10000
-direct_reclaim: -0.20   # direct_reclaim_rate_per_sec / 100
-cpu_busy:       -0.10   # host_cpu_busy_ratio
-dirty:          -0.05   # host_dirty_kb / 200000
+# Reward metrics for online controllers.
+# direction controls whether larger normalized values improve reward.
+metrics:
+  - name: mem_avail
+    key: host_mem_available_ratio
+    direction: maximize
+    weight: 0.35
+    scale: 1.0
+  - name: rq_latency
+    key: rq_latency_p95_us
+    direction: minimize
+    weight: 0.30
+    scale: 10000.0
+  - name: direct_reclaim
+    key: direct_reclaim_rate_per_sec
+    direction: minimize
+    weight: 0.20
+    scale: 100.0
+  - name: cpu_busy
+    key: host_cpu_busy_ratio
+    direction: minimize
+    weight: 0.10
+    scale: 1.0
+  - name: dirty
+    key: host_dirty_kb
+    direction: minimize
+    weight: 0.05
+    scale: 200000.0

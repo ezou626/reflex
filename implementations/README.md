@@ -27,6 +27,9 @@ Run a daemon config:
 ```bash
 uv run python -m implementations.main heuristic --dry-run
 uv run python -m implementations.main classifier --dry-run
+uv run python -m implementations.main hillclimb --dry-run
+uv run python -m implementations.main bandit --dry-run
+uv run python -m implementations.main openai --dry-run
 ```
 
 Use `-h` to see all discovered daemon ids.

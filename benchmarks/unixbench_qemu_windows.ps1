@@ -16,6 +16,7 @@ Useful parameters:
   -Modes "workload_only,heuristic"   (quoted, comma-separated)
   -SshPort 52223
   -DiskGB 32
+    -OpenAIApiKey "<key>"              (optional; defaults to host OPENAI_API_KEY or .env)
 #>
 
 [CmdletBinding()]
@@ -26,6 +27,7 @@ param(
     [int]$MemoryMB = 4096,
     [int]$Cpus = 2,
     [string]$CacheDir = "",
+    [string]$OpenAIApiKey = "",
     [string]$UbuntuImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
     [string]$UnixBenchUrl = "https://github.com/kdlucas/byte-unixbench.git",
     [switch]$KeepVm,
@@ -51,6 +53,41 @@ function Resolve-CommandPath {
         if ($cmd) {
             return $cmd.Source
         }
+    }
+    return $null
+}
+
+function Get-DotEnvValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+    foreach ($rawLine in Get-Content $Path) {
+        $line = $rawLine.Trim()
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
+            continue
+        }
+        if ($line -match '^\s*export\s+') {
+            $line = $line -replace '^\s*export\s+', ''
+        }
+        $parts = $line.Split("=", 2)
+        if ($parts.Count -ne 2) {
+            continue
+        }
+        $key = $parts[0].Trim()
+        if ($key -ne $Name) {
+            continue
+        }
+        $value = $parts[1].Trim()
+        if ($value.Length -ge 2) {
+            if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"'))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+        return $value
     }
     return $null
 }
@@ -125,6 +162,17 @@ function Invoke-Guest {
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
+
+if ([string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+    $OpenAIApiKey = $env:OPENAI_API_KEY
+}
+if ([string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+    $dotEnvPath = Join-Path $repoRoot ".env"
+    $OpenAIApiKey = Get-DotEnvValue -Path $dotEnvPath -Name "OPENAI_API_KEY"
+    if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+        Write-Step "Loaded OPENAI_API_KEY from .env"
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($CacheDir)) {
     $CacheDir = Join-Path $repoRoot "data\qemu-windows"
@@ -230,6 +278,10 @@ Write-Step "Creating VM overlay"
 & $qemuImg create -f qcow2 -F qcow2 -b (Resolve-Path $baseImg) $overlay | Out-Host
 & $qemuImg resize $overlay "${DiskGB}G" | Out-Host
 
+Write-Step "Boosting power plan for benchmark"
+powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PERFBOOSTMODE 1
+powercfg -setactive SCHEME_CURRENT
+
 Write-Step "Starting QEMU on 127.0.0.1:$SshPort"
 $qemuArgs = @(
     "-machine", "type=q35,accel=whpx",
@@ -245,6 +297,17 @@ $qemuArgs = @(
     "-device", "e1000,netdev=net0"
 )
 $qemuProc = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -RedirectStandardError $qemuLog -PassThru -WindowStyle Hidden
+try {
+    # Prefer the highest practical priority for benchmark stability.
+    $qemuProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::RealTime
+} catch {
+    try {
+        $qemuProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
+    } catch {
+        Write-Step "Warning: Could not raise QEMU process priority."
+    }
+}
+$qemuProc.ProcessorAffinity = [IntPtr]0xFF  # P-cores; adjust mask as needed
 
 try {
     New-Item -ItemType File -Force -Path $KnownHosts | Out-Null
@@ -268,9 +331,20 @@ try {
     }
 
     Write-Step "Running guest setup and UnixBench comparison"
+    $openAiExportLine = ""
+    if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
+        # Avoid brittle quote escaping by passing the key as base64 and decoding in guest.
+        $keyBytes = [Text.Encoding]::UTF8.GetBytes($OpenAIApiKey)
+        $keyB64 = [Convert]::ToBase64String($keyBytes)
+        $openAiExportLine = "export OPENAI_API_KEY=`$(printf '%s' '$keyB64' | base64 -d)"
+    } else {
+        Write-Step "OPENAI_API_KEY not provided; OpenAI controller runs will no-op."
+    }
+
     $guestScript = @'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+__OPENAI_API_KEY_EXPORT__
 
 wait_for_apt() {
   if command -v cloud-init >/dev/null 2>&1; then
@@ -333,7 +407,7 @@ UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" bash benchmarks/unixbench_compare.sh --
 '@
     $suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
     $dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
-    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg)
+    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg).Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
     $guestScript = $guestScript -replace "`r", ""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
     Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_unixbench.sh && bash /home/ubuntu/run_reflex_unixbench.sh"
