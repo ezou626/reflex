@@ -161,7 +161,7 @@ static int handle_event(void *ctx, void *data, size_t data_size) {
             blk_lat[blk_lat_n++] = p->value_u32;
         break;
     case EVENT_SCHED_SWITCH:
-        ctx_switch_count++;
+        ctx_switch_count += p->value_u32;  // value_u32 = SW_BATCH (100) per batched emit
         break;
     case EVENT_DIRECT_RECLAIM:
         direct_reclaim_count++;

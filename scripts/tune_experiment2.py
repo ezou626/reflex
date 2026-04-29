@@ -24,20 +24,20 @@ import numpy as np
 from skopt import Optimizer
 from skopt.space import Integer
 
-from daemon_core.tuners.loaders import load_tuner_catalog
-from daemon_core.tuners.schema import TunerCatalogEntry
-from daemon_core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path, write_sysctl
-from implementations.aggregators.current_payload import _PAYLOAD_SIZE, decode_payload
-
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "daemon"))
+sys.path.insert(0, str(REPO))
 
-from config.loaders import load_tuner_catalog  # noqa: E402
-from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path  # noqa: E402
+from daemon_core.tuners.loaders import load_tuner_catalog  # noqa: E402
+from daemon_core.tuners.sysctl_util import (  # noqa: E402
+    read_sysctl,
+    sysctl_name_to_path,
+    write_sysctl,
+)
 
 LOADER       = REPO / "build" / "loader2"
 CATALOG      = REPO / "configs" / "tuner_catalog.yaml"
-EXPERIMENTS  = REPO / "models" / "experiments.jsonl"
+MODELS_DIR   = REPO / "implementations" / "controllers" / "workload_classifier" / "models"
+EXPERIMENTS  = MODELS_DIR / "experiments.jsonl"
 
 # struct summary from src/loader2.c (1 record/sec):
 #   window_end_ns u64, rq_p95_us u32, syscall_count u32, failure_count u32,
@@ -55,7 +55,7 @@ def make_cgroup() -> tuple[Path, int]:
 
 def load_tuners():
     """Enabled runtime_sysctl int knobs with bounds — these are our search dims."""
-    cat = load_tuner_catalog(catalog_path)
+    cat = load_tuner_catalog(CATALOG)
     return [
         e for e in cat.tuners
         if e.enabled and e.scope == "runtime_sysctl" and e.kind == "int"
@@ -185,7 +185,8 @@ def main() -> int:
 
     # Loader is the eBPF metric source — spawn once with our cgid filter.
     # stderr → log file so BPF attach failures are diagnosable instead of silent.
-    loader_log = (REPO / "models" / "loader.log").open("a", buffering=1)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    loader_log = (MODELS_DIR / "loader.log").open("a", buffering=1)
     loader = subprocess.Popen([str(LOADER), str(os.getpid()), str(cgid)],
                               stdout=subprocess.PIPE, stderr=loader_log)
     ev_q   = start_reader(loader)

@@ -46,7 +46,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: kernel.sched_autogroup_enabled
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 1
     step: 1
@@ -86,7 +86,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.page-cluster
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 5
     step: 1
@@ -96,7 +96,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.compaction_proactiveness
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 100
     step: 10
@@ -116,7 +116,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.extfrag_threshold
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 1000
     step: 50
@@ -126,7 +126,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.max_map_count
     kind: int
-    enabled: true
+    enabled: false
     min_value: 65530
     max_value: 524288
     step: 65536
@@ -136,7 +136,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.overcommit_memory
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 2
     step: 1
@@ -146,7 +146,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: vm.overcommit_kbytes
     kind: int
-    enabled: true
+    enabled: false
     min_value: 0
     max_value: 8388608
     step: 262144
@@ -176,7 +176,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: net.core.netdev_budget
     kind: int
-    enabled: true
+    enabled: false
     min_value: 100
     max_value: 600
     step: 50
@@ -216,7 +216,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: net.ipv4.tcp_max_syn_backlog
     kind: int
-    enabled: true
+    enabled: false
     min_value: 512
     max_value: 4096
     step: 256
@@ -256,7 +256,7 @@ tuners:
     scope: runtime_sysctl
     sysctl: net.ipv4.tcp_retries2
     kind: int
-    enabled: true
+    enabled: false
     min_value: 8
     max_value: 15
     step: 1

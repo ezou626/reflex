@@ -7,4 +7,4 @@ CGID=$(stat -c %i "$CGDIR")
 bash -c "$*" &
 PID=$!
 echo "$PID" | sudo tee "$CGDIR/cgroup.procs" > /dev/null
-echo "$CGID" >> /tmp/reflex_cgroups
+echo "$CGID" | sudo tee -a /tmp/reflex_cgroups > /dev/null

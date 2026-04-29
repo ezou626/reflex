@@ -70,6 +70,15 @@ struct {
   __type(value, u64);
 } blk_issue_ts SEC(".maps");
 
+/* per-cpu sched_switch counter — emit one EVENT_SCHED_SWITCH per SW_BATCH switches */
+#define SW_BATCH 100
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, 1);
+  __type(key, __u32);
+  __type(value, __u64);
+} sw_counter SEC(".maps");
+
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 256);
@@ -150,8 +159,28 @@ int handle_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
 
 SEC("tp/sched/sched_switch")
 int handle_sched_switch(struct trace_event_raw_sched_switch *ctx) {
-    // sched_switch events not emitted individually — too high volume.
-    // context switch rate is derived from sched_switch count in the decision engine if needed.
+    /* batch-emit context switch count — one EVENT_SCHED_SWITCH per SW_BATCH switches.
+     * value_u32 carries the batch size so the aggregator can reconstruct the true rate. */
+    __u32 key = 0;
+    __u64 *cnt = bpf_map_lookup_elem(&sw_counter, &key);
+    if (cnt) {
+        (*cnt)++;
+        if (*cnt >= SW_BATCH) {
+            struct payload *sw = bpf_ringbuf_reserve(&events, sizeof(*sw), 0);
+            if (sw) {
+                sw->event_type = EVENT_SCHED_SWITCH;
+                sw->cpu        = bpf_get_smp_processor_id();
+                sw->pid        = 0;
+                sw->tgid       = 0;
+                sw->ts_ns      = bpf_ktime_get_ns();
+                sw->value_i32  = 0;
+                sw->value_u32  = SW_BATCH;
+                sw->comm[0]    = '\0';
+                bpf_ringbuf_submit(sw, 0);
+            }
+            *cnt = 0;
+        }
+    }
 
     /* compute wakeup->oncpu latency for the task being switched in */
     __u32 next_pid = ctx->next_pid;

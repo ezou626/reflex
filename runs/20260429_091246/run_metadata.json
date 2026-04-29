@@ -1,0 +1,11 @@
+{
+  "run_id": null,
+  "daemon_id": "classifier",
+  "run_dir": "runs/20260429_091246",
+  "dry_run": false,
+  "no_sudo": false,
+  "loader_binary": "build/loader",
+  "tuner_catalog": "/home/ubuntu/reflex/configs/tuner_catalog.yaml",
+  "window_sec": 1.0,
+  "cgroup_id": []
+}

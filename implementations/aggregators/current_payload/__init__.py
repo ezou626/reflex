@@ -46,6 +46,11 @@ class WindowState:
 
     def add_event(self, event: dict[str, Any]) -> None:
         name = event["event_name"]
+        if name == "sched_switch":
+            self.event_counts["sched_switch"] = (
+                self.event_counts.get("sched_switch", 0) + event.get("sw_batch", 1)
+            )
+            return
         self.event_counts[name] = self.event_counts.get(name, 0) + 1
         if name == "sys_exit":
             self.sys_exit_count += 1
@@ -84,7 +89,7 @@ def decode_payload(chunk: bytes) -> dict[str, Any]:
         event["child_pid"] = int(value_u32)
     elif event_type == EVENT_SCHED_SWITCH:
         event["prev_pid"] = int(value_i32)
-        event["next_pid"] = int(value_u32)
+        event["sw_batch"] = int(value_u32)  # batch count emitted by BPF (SW_BATCH=100)
     elif event_type == EVENT_SYSCALL_EXIT:
         event["syscall_id"] = int(value_u32)
         event["ret"] = int(value_i32)

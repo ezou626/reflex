@@ -19,8 +19,9 @@ from skopt import Optimizer
 from skopt.space import Integer
 
 REPO        = Path(__file__).resolve().parent.parent
-EXPERIMENTS = REPO / "models" / "experiments.jsonl"
-LIBRARY     = REPO / "models" / "library.json"
+MODELS_DIR  = REPO / "implementations" / "controllers" / "workload_classifier" / "models"
+EXPERIMENTS = MODELS_DIR / "experiments.jsonl"
+LIBRARY     = MODELS_DIR / "library.json"
 CATALOG     = REPO / "configs" / "tuner_catalog.yaml"
 MAX_K       = 6
 MIN_FIT     = 5     # below this, GP would just overfit — fall back to observed argmax
@@ -43,8 +44,8 @@ NORMS: dict[str, float] = {
     "fork_rate":           1_000.0,
 }
 
-sys.path.insert(0, str(REPO / "daemon"))
-from config.loaders import load_tuner_catalog  # noqa: E402
+sys.path.insert(0, str(REPO))
+from daemon_core.tuners.loaders import load_tuner_catalog  # noqa: E402
 
 
 def _cluster_gp_best(members: list[dict], space: list) -> dict:

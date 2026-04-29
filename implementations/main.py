@@ -110,7 +110,7 @@ def _jsonable(value: Any) -> Any:
 def _write_jsonl(path: Path, records: list[Any]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for record in records:
-            handle.write(json.dumps(record, default=_jsonable) + "\n")
+            handle.write(json.dumps(record, indent=2, default=_jsonable) + "\n")
 
 
 def main() -> int:
