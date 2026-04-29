@@ -32,17 +32,36 @@ function Test-Admin {
 function Install-WingetCandidate {
     param(
         [string]$Name,
-        [string[]]$Ids
+        [string[]]$Ids,
+        [string[]]$CommandNames = @()
     )
+    foreach ($commandName in $CommandNames) {
+        if (Get-Command $commandName -ErrorAction SilentlyContinue) {
+            Write-Step "$Name already available on PATH as $commandName; skipping winget install."
+            return
+        }
+    }
+
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "winget not found. Install App Installer from Microsoft Store, then rerun this script."
     }
 
+    $installed = winget list --accept-source-agreements 2>$null
     foreach ($id in $Ids) {
+        if ($installed -match [Regex]::Escape($id)) {
+            Write-Step "$Name already installed according to winget id=$id; skipping install."
+            return
+        }
         Write-Step "Installing $Name via winget id=$id"
         winget install --id $id --exact --silent --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -eq 0) {
             return
+        }
+        foreach ($commandName in $CommandNames) {
+            if (Get-Command $commandName -ErrorAction SilentlyContinue) {
+                Write-Step "$Name install reported failure, but $commandName is now available; continuing."
+                return
+            }
         }
         Write-Step "winget id=$id did not install cleanly; trying next candidate if available"
     }
@@ -86,12 +105,12 @@ if ($EnableWindowsFeatures) {
 }
 
 if (-not $SkipPackageInstall) {
-    Install-WingetCandidate -Name "Git" -Ids @("Git.Git")
-    Install-WingetCandidate -Name "uv" -Ids @("astral-sh.uv")
+    Install-WingetCandidate -Name "Git" -Ids @("Git.Git") -CommandNames @("git")
+    Install-WingetCandidate -Name "uv" -Ids @("astral-sh.uv") -CommandNames @("uv")
     Install-WingetCandidate -Name "QEMU" -Ids @(
         "SoftwareFreedomConservancy.QEMU",
         "QEMU.QEMU"
-    )
+    ) -CommandNames @("qemu-system-x86_64", "qemu-system-x86_64.exe")
 
     if (Test-Admin) {
         Write-Step "Ensuring OpenSSH Client capability is installed"
