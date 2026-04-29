@@ -2,7 +2,7 @@
 # train.sh — Run all workloads through the BO tuning loop.
 #
 # Usage:
-#   sudo ./scripts/train.sh [options]
+#   sudo ./train.sh [options]
 #
 # Options:
 #   -n N    BO experiments per workload (default: 25)
@@ -11,7 +11,7 @@
 #   -s S    Cool-down between experiments (default: 8)
 #   -l LIST Comma-separated workload numbers, e.g. 1,3,6-10
 #   -x      Skip sysctl writes, stressor, and daemon (loop test only)
-#   -r      Reset models (delete experiments.jsonl, library.json, gp_*.pkl)
+#   -r      Reset models (delete BO experiments JSONL, library.json, gp_*.pkl)
 #   -h      Show this message
 #
 # Required:   sudo apt install -y stress-ng fio sysbench gcc
@@ -26,8 +26,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-PYTHON="${REPO_ROOT}/.venv/bin/python3"
 TUNER="${SCRIPT_DIR}/tune_experiment.py"
+EXPERIMENTS_PATH="${REPO_ROOT}/implementations/controllers/bo/models/experiments.jsonl"
+LIBRARY_PATH="${REPO_ROOT}/models/library.json"
 
 NCPU=$(nproc)
 
@@ -70,7 +71,7 @@ while getopts "n:d:w:s:l:rxh" opt; do
         s) SETTLE="$OPTARG" ;;
         l) WORKLOAD_FILTER="$OPTARG" ;;
         x) DRY_RUN_FLAG="--dry-run" ;;
-        r) rm -f "${REPO_ROOT}/models/experiments.jsonl" "${REPO_ROOT}/models/library.json" "${REPO_ROOT}/models/gp_"*.pkl ;;
+        r) rm -f "$EXPERIMENTS_PATH" "$LIBRARY_PATH" "${REPO_ROOT}/models/gp_"*.pkl ;;
         h) sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) exit 1 ;;
     esac
@@ -91,9 +92,9 @@ check_deps() {
         echo "Install with: sudo apt install -y ${missing[*]}"
         exit 1
     fi
-    if [[ ! -x "$PYTHON" ]]; then
-        echo "Python not found at $PYTHON"
-        echo "Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    if ! command -v uv &>/dev/null; then
+        echo "uv not found"
+        echo "Run: scripts/setup_dev_env.sh"
         exit 1
     fi
 
@@ -449,7 +450,7 @@ run_workload() {
     echo "  Stressor: $cmd"
     echo "============================================================"
 
-    "$PYTHON" "$TUNER" \
+    uv run python "$TUNER" \
         --stressor "$cmd" \
         --experiments "$EXPERIMENTS" \
         --duration   "$DURATION" \
@@ -475,7 +476,7 @@ echo "============================================================"
 echo ""
 
 if [[ -z "$DRY_RUN_FLAG" && $EUID -ne 0 ]]; then
-    echo "error: must run as root (sudo ./scripts/train.sh)" >&2
+    echo "error: must run as root (sudo ./train.sh)" >&2
     exit 1
 fi
 
@@ -498,7 +499,7 @@ done
 
 EST_MIN=$(( TOTAL * EXPERIMENTS * (WARMUP + DURATION + 4 + SETTLE) / 60 ))
 echo "Running $TOTAL workload(s).  Estimated time: ${EST_MIN} minutes."
-echo "Results accumulate in models/experiments.jsonl — safe to Ctrl+C and resume."
+echo "Results accumulate in ${EXPERIMENTS_PATH} — safe to Ctrl+C and resume."
 echo ""
 
 DONE=0
@@ -511,15 +512,15 @@ done
 
 echo ""
 echo "--- Running k-means clustering over all ${EXPERIMENTS}-experiment sessions ---"
-"$PYTHON" - <<PYEOF
+uv run python - <<PYEOF
 import sys
 sys.path.insert(0, "${REPO_ROOT}/daemon")
 sys.path.insert(0, "${REPO_ROOT}/scripts")
 from tune_experiment import cluster_and_save_library
 from pathlib import Path
 cluster_and_save_library(
-    Path("${REPO_ROOT}/models/experiments.jsonl"),
-    Path("${REPO_ROOT}/models/library.json"),
+    Path("${EXPERIMENTS_PATH}"),
+    Path("${LIBRARY_PATH}"),
     catalog_path=Path("${REPO_ROOT}/configs/tuner_catalog.yaml"),
     max_k=8,
 )
@@ -528,6 +529,6 @@ PYEOF
 echo ""
 echo "============================================================"
 echo "  Training complete."
-echo "  Library written to: ${REPO_ROOT}/models/library.json"
+echo "  Library written to: ${LIBRARY_PATH}"
 echo "  Reload the runtime daemon to pick up the new workload library."
 echo "============================================================"

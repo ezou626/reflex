@@ -10,20 +10,21 @@ feature vectors — no labeling required. Run with different stressors across
 sessions; the system figures out which programs produce similar system signatures
 and assigns each group an optimal config.
 
-All experiments are appended to models/experiments.jsonl across sessions.
+All experiments are appended to
+implementations/controllers/bo/models/experiments.jsonl across sessions.
 After each run, k-means clusters all collected feature vectors and writes
 models/library.json — the file WorkloadClassifier reads at runtime.
 
 Usage (must run as root):
-    sudo .venv/bin/python3 scripts/tune_experiment.py \\
+    sudo uv run python scripts/tune_experiment.py \\
         --stressor "./build/tester_mem 80 5" --experiments 30
 
     # Second session with a different program accumulates into the same dataset:
-    sudo .venv/bin/python3 scripts/tune_experiment.py \\
+    sudo uv run python scripts/tune_experiment.py \\
         --stressor "stress-ng --vm 2 --vm-bytes 75%" --experiments 20
 
     # Dry-run (no sysctl writes, no stressor launched):
-    sudo .venv/bin/python3 scripts/tune_experiment.py \\
+    sudo uv run python scripts/tune_experiment.py \\
         --stressor "./build/tester_mem 80 5" --experiments 5 --dry-run
 """
 
@@ -57,6 +58,9 @@ from config.loaders import load_tuner_catalog
 from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_EXPERIMENTS_PATH = (
+    REPO_ROOT / "implementations" / "controllers" / "bo" / "models" / "experiments.jsonl"
+)
 
 JOINT_TUNER_IDS = [
     # memory reclaim
@@ -663,6 +667,13 @@ def main() -> int:
         help="Directory for GP models and library (default: models/)",
     )
     parser.add_argument(
+        "--experiments-path", type=Path, default=DEFAULT_EXPERIMENTS_PATH,
+        help=(
+            "JSONL path for BO training observations "
+            "(default: implementations/controllers/bo/models/experiments.jsonl)"
+        ),
+    )
+    parser.add_argument(
         "--catalog", type=Path,
         default=REPO_ROOT / "configs" / "tuner_catalog.yaml",
     )
@@ -703,7 +714,7 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
-    experiments_path = args.model_dir / "experiments.jsonl"
+    experiments_path = args.experiments_path
     library_path     = args.model_dir / "library.json"
 
     print(f"\nStressor:  {' '.join(stressor_cmd)}")
@@ -725,6 +736,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_stop)
 
     args.model_dir.mkdir(parents=True, exist_ok=True)
+    experiments_path.parent.mkdir(parents=True, exist_ok=True)
     results_fh = experiments_path.open("a", encoding="utf-8", buffering=1)
 
     try:

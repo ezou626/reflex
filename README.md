@@ -49,7 +49,7 @@
     - `--policy-file` (YAML; see [`configs/tuning_policy.yaml`](configs/tuning_policy.yaml)) and `--tuner-catalog` (sysctl catalog; [`configs/tuner_catalog.yaml`](configs/tuner_catalog.yaml))
     - `--external-proposals` optional JSONL of actions from an external or ML controller
     - `--dry-run` for baseline collection without applying tunables
-    - `uv sync --extra dev && uv run pytest` runs catalog and sysctl helper tests
+    - `uv sync --extra dev && uv run pytest && uv run ruff check` runs catalog/sysctl tests and lint checks
   - **Benchmarks and workload scenarios**
     - **What a scenario is:** a named entry under `profiles:` in [`configs/profiles.yaml`](configs/profiles.yaml). Each profile has:
       - **`command`** — shell one-liner (usually `stress-ng …` or `fio …`) that is the main workload.
@@ -64,10 +64,10 @@
       - `bash benchmarks/run_profile.sh <profile> workload_only`
       - Optional: `IDLE_BEFORE_SEC=3 IDLE_AFTER_SEC=2 bash benchmarks/run_profile.sh wsl_safe classifier`
       - Artifacts: `data/runs/profile-<profile>-<mode>-<timestamp>/` — `summary.jsonl`, `workload.log`, `run_metadata.json`, plus `daemon.log` / `decisions.jsonl` when not `workload_only`.
-    - **Run a full comparison matrix (Python, recommended):** one command runs each requested daemon mode, then `workload_only`, then scorecards all pairs. Requires **sudo** for daemon modes (BCC).
-      - `uv run python benchmarks/run_controller_matrix.py --profile wsl_safe` — default modes are `heuristic,classifier` plus `workload_only` baseline.
-      - `uv run python benchmarks/run_controller_matrix.py --profile wsl_safe --controller-modes heuristic,classifier,noop` — compare any combination.
-      - `uv run python benchmarks/run_controller_matrix.py --profile cpu_bound --controller-modes classifier --no-workload-only` — single mode without baseline.
+    - **Run a full comparison matrix (Python, recommended):** one command runs each requested daemon mode, then `workload_only`, then scorecards all pairs. Requires **sudo** because the daemon loads eBPF programs.
+      - `sudo uv run python benchmarks/run_controller_matrix.py --profile wsl_safe --controller-modes noop,heuristic,classifier --trials 3`
+      - `sudo uv run python benchmarks/run_controller_matrix.py --profile wsl_safe --controller-modes heuristic,classifier,noop` — compare any combination.
+      - `sudo uv run python benchmarks/run_controller_matrix.py --profile cpu_bound --controller-modes classifier --no-workload-only` — single mode without baseline.
       - **Multiple trials (less noise):** `--trials 10` repeats the full sequence; outputs include `data/runs/<prefix>-<profile>-batch-<ts>/index.json`, **`scorecard_matrix_median.json`**, and **`scorecard_matrix_median.summary.txt`**. Stdout shows the **compact table**; keep the JSON for min/max per trial.
       - Useful flags: `--run-prefix matrix`, `--idle-before-sec`, `--idle-after-sec`, `--warmup-sec`, `--scorecard-drop-first` / `--scorecard-drop-last`, `--scorecard-no-workload-window`, `--scorecard-include-psi-totals`, `--no-workload-only` (skip baseline sampler run).
     - **Manual scorecard on existing runs:** pass any number of `LABEL:PATH` pairs to `scorecard_matrix.py`; it produces all pairwise comparisons:
@@ -81,10 +81,10 @@
       4. Set **`warmup_sec`** (can be `0`). Warmup uses `timeout <warmup_sec> bash -lc '<command>'`; keep warmup shorter than or equal to a full run if the command ignores partial runs.
       5. Install any new binaries on the machine (`stress-ng`, `fio`, etc.).
       6. Smoke-test: `bash benchmarks/run_profile.sh my_scenario workload_only` then `bash benchmarks/run_profile.sh my_scenario heuristic` (needs BCC).
-      7. Run the matrix: `uv run python benchmarks/run_controller_matrix.py --profile my_scenario --trials 3 --controller-modes heuristic,classifier,noop`
+      7. Run the matrix: `sudo uv run python benchmarks/run_controller_matrix.py --profile my_scenario --trials 3 --controller-modes heuristic,classifier,noop`
     - **Interpreting scorecards:** any two controller modes vs each other shows **policy differences**; any controller vs **workload_only** shows **daemon + eBPF overhead** vs host sampling only. `classifier` applies the pre-trained best config on workload-class change; comparing it against `heuristic` shows ML vs rule-based tuning. Prefer **`wsl_safe`** or other 30 s profiles when you care about loadavg; use **`wsl_quick`** for fast iteration. Cumulative PSI `*_total` keys are dropped from the default scorecard; pass `--scorecard-include-psi-totals` to include them.
   - Per-run report generation:
-    - `python benchmarks/report_run.py data/runs/<run-id>`
-    - `python benchmarks/report_run.py data/runs/<run-id> --format json --output data/runs/<run-id>/report.json`
+    - `uv run python benchmarks/report_run.py data/runs/<run-id>`
+    - `uv run python benchmarks/report_run.py data/runs/<run-id> --format json --output data/runs/<run-id>/report.json`
   - End-to-end QEMU-backed loop:
     - `bash scripts/run_dev_loop_qemu.sh cpu_bound`
