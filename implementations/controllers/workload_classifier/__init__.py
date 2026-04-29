@@ -12,33 +12,34 @@ from implementations.executors import BatchTunerExecutor
 
 DEFAULT_LIBRARY_PATH = Path(__file__).resolve().parent / "models" / "library.json"
 
-# 8-dim normalized feature space for centroid comparison.
-# Keys may live in summary["metrics"] or summary["host_features"].
-# Must stay in sync with _FEATURE_MAP in scripts/tune_experiment.py.
-_FEATURE_MAP: list[tuple[str, float]] = [
-    ("rq_latency_p95_us", 10_000.0),
-    ("context_switch_rate_per_sec", 100_000.0),
-    ("syscall_error_rate", 1.0),
-    ("host_cpu_busy_ratio", 1.0),
-    ("host_mem_available_ratio", 1.0),
-    ("host_dirty_kb", 200_000.0),
-    ("direct_reclaim_rate_per_sec", 100.0),
-    ("blk_latency_p95_us", 50_000.0),
-]
+# Feature space is now defined per library entry (`feature_keys` + `feature_norms`)
+# rather than hardcoded — kmeans.py writes both alongside each centroid, so the
+# classifier reads whatever space the library was trained in.
+#
+# Live summary dicts are produced by an aggregator wrapping src/loader2.c, with
+# keys matching what scripts/tune_experiment2.py records:
+#   p95_latency, throughput, mem, io, cpu, failures,
+#   blk_p95_latency, ctx_switch_rate, direct_reclaim_rate, fork_rate
 
 
-def _summary_to_vec(summary: dict[str, Any]) -> np.ndarray:
+def _summary_get(summary: dict[str, Any], key: str) -> float:
+    """Look up a metric from either nested sub-dict of an aggregator summary."""
     metrics = summary.get("metrics", {})
     host = summary.get("host_features", {})
+    value = metrics.get(key)
+    if value is None:
+        value = host.get(key, 0.0)
+    return float(value) if value is not None else 0.0
 
-    def _get(key: str) -> float:
-        value = metrics.get(key)
-        if value is None:
-            value = host.get(key, 0.0)
-        return float(value) if value is not None else 0.0
 
+def _summary_to_vec(
+    summary: dict[str, Any],
+    feature_keys: list[str],
+    feature_norms: list[float],
+) -> np.ndarray:
+    """Project a summary onto the same normalized feature space as the library entry."""
     return np.array(
-        [min(_get(key) / norm, 1.0) for key, norm in _FEATURE_MAP],
+        [min(_summary_get(summary, k) / n, 1.0) for k, n in zip(feature_keys, feature_norms)],
         dtype=np.float64,
     )
 
@@ -89,12 +90,17 @@ class WorkloadClassifier:
     def classify(self, summary: dict[str, Any]) -> str | None:
         if not self._entries:
             return None
-        vec = _summary_to_vec(summary)
         best_name: str | None = None
         best_dist: float = self._max_distance
         for name, entry in self._entries.items():
-            centroid = np.array(entry["centroid"], dtype=np.float64)
-            dist = float(np.linalg.norm(vec - centroid))
+            keys     = entry.get("feature_keys")
+            norms    = entry.get("feature_norms")
+            centroid = entry.get("centroid")
+            if not keys or not norms or centroid is None:
+                continue
+            vec      = _summary_to_vec(summary, keys, norms)
+            centroid_arr = np.array(centroid, dtype=np.float64)
+            dist     = float(np.linalg.norm(vec - centroid_arr))
             if dist < best_dist:
                 best_dist = dist
                 best_name = name
@@ -110,8 +116,12 @@ class WorkloadClassifier:
         return {key: int(value) for key, value in best_config.items()}
 
     def best_reward(self, workload_class: str) -> float | None:
+        # kmeans.py writes `observed_best_reward`; v1 libraries used `best_reward`.
         entry = self._entries.get(workload_class)
-        return float(entry["best_reward"]) if entry else None
+        if not entry:
+            return None
+        val = entry.get("observed_best_reward", entry.get("best_reward"))
+        return float(val) if val is not None else None
 
 
 class WorkloadClassifierController:

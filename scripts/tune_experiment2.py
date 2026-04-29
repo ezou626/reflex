@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import queue
+import shlex
+import struct
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -24,19 +30,30 @@ from daemon_core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path, wri
 from implementations.aggregators.current_payload import _PAYLOAD_SIZE, decode_payload
 
 REPO = Path(__file__).resolve().parent.parent
-LOADER = REPO / "implementations" / "ebpf" / "build" / "reflex"
-CATALOG = REPO / "configs" / "tuner_catalog.yaml"
-EXPERIMENTS = (
-    REPO
-    / "implementations"
-    / "controllers"
-    / "workload_classifier"
-    / "models"
-    / "experiments.jsonl"
-)
+sys.path.insert(0, str(REPO / "daemon"))
+
+from config.loaders import load_tuner_catalog  # noqa: E402
+from tuners.sysctl_util import read_sysctl, write_sysctl, sysctl_name_to_path  # noqa: E402
+
+LOADER       = REPO / "build" / "loader2"
+CATALOG      = REPO / "configs" / "tuner_catalog.yaml"
+EXPERIMENTS  = REPO / "models" / "experiments.jsonl"
+
+# struct summary from src/loader2.c (1 record/sec):
+#   window_end_ns u64, rq_p95_us u32, syscall_count u32, failure_count u32,
+#   blk_p95_us u32, ctx_switch_count u32, direct_reclaim_count u32, fork_count u32
+SUMMARY_FMT  = "=QIIIIIII"
+SUMMARY_SIZE = struct.calcsize(SUMMARY_FMT)
 
 
-def load_tuners(catalog_path: Path) -> list[TunerCatalogEntry]:
+def make_cgroup() -> tuple[Path, int]:
+    """Create a fresh cgroup for the stressor; return (dir, cgroup_id)."""
+    d = Path(f"/sys/fs/cgroup/reflex_tune_{os.getpid()}")
+    d.mkdir(exist_ok=True)
+    return d, d.stat().st_ino
+
+
+def load_tuners():
     """Enabled runtime_sysctl int knobs with bounds — these are our search dims."""
     cat = load_tuner_catalog(catalog_path)
     return [
@@ -59,47 +76,70 @@ def _psi_some_avg10(resource: str) -> float:
     return 0.0
 
 
-def measure(loader: subprocess.Popen[bytes], seconds: float) -> dict[str, float]:
-    """Drain loader payloads for `seconds`; return metrics for the reward function."""
+def start_reader(loader: subprocess.Popen) -> queue.Queue:
+    """Background thread drains loader2 summary records into a queue."""
+    q: queue.Queue = queue.Queue()
+    def _reader() -> None:
+        assert loader.stdout is not None
+        while True:
+            buf = loader.stdout.read(SUMMARY_SIZE)
+            if not buf or len(buf) < SUMMARY_SIZE:
+                break
+            q.put(struct.unpack(SUMMARY_FMT, buf))
+    threading.Thread(target=_reader, daemon=True).start()
+    return q
+
+
+def measure(ev_q: queue.Queue, seconds: float) -> dict[str, float]:
+    """Pull 1Hz summary records for `seconds`; return aggregated metrics for the reward function."""
     deadline = time.time() + seconds
-    rq_latency_us: list[int] = []
-    blk_latency_us: list[int] = []
-    fails = 0
-    syscalls = 0
+    rq_p95s: list[int]  = []
+    blk_p95s: list[int] = []
+    syscalls            = 0
+    fails               = 0
+    ctx_switches        = 0
+    direct_reclaims     = 0
+    forks               = 0
     psi_mem = _psi_some_avg10("memory")
     psi_io  = _psi_some_avg10("io")
     psi_cpu = _psi_some_avg10("cpu")
     t0 = time.time()
-    while time.time() < deadline:
-        if loader.stdout is None:
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
             break
-        buf = loader.stdout.read(_PAYLOAD_SIZE)
-        if not buf or len(buf) < _PAYLOAD_SIZE:
+        try:
+            (_ts, rq_p95_us, sys_n, fail_n,
+             blk_p95_us, ctx_n, reclaim_n, fork_n) = ev_q.get(timeout=remaining)
+        except queue.Empty:
             break
-        event = decode_payload(buf)
-        if event["event_name"] == "rq_latency":
-            rq_latency_us.append(int(event["rq_latency_us"]))
-        elif event["event_name"] == "blk_latency":
-            blk_latency_us.append(int(event["blk_lat_us"]))
-        elif event["event_name"] == "sys_exit":
-            syscalls += 1
-        if event.get("is_error", False):
-            fails += 1
+        if rq_p95_us:
+            rq_p95s.append(rq_p95_us)
+        if blk_p95_us:
+            blk_p95s.append(blk_p95_us)
+        syscalls        += sys_n
+        fails           += fail_n
+        ctx_switches    += ctx_n
+        direct_reclaims += reclaim_n
+        forks           += fork_n
     elapsed = max(time.time() - t0, 1e-6)
     # Average PSI across the window: pre + post / 2 is good enough for a noisy signal.
     psi_mem = (psi_mem + _psi_some_avg10("memory")) / 2.0
     psi_io  = (psi_io  + _psi_some_avg10("io"))     / 2.0
     psi_cpu = (psi_cpu + _psi_some_avg10("cpu"))    / 2.0
     return {
-        "p95_latency": float(np.percentile(rq_latency_us, 95)) if rq_latency_us else 0.0,
-        "blk_p95_latency": (
-            float(np.percentile(blk_latency_us, 95)) if blk_latency_us else 0.0
-        ),
+        # Reward-function features (don't change names — reward_fn reads these).
+        "p95_latency": float(np.mean(rq_p95s)) if rq_p95s else 0.0,
         "throughput":  syscalls / elapsed,
         "mem":         psi_mem,
         "io":          psi_io,
         "cpu":         psi_cpu,
         "failures":    fails / elapsed,
+        # Extra clustering-only features. Reward function ignores these.
+        "blk_p95_latency":    float(np.mean(blk_p95s)) if blk_p95s else 0.0,
+        "ctx_switch_rate":    ctx_switches / elapsed,
+        "direct_reclaim_rate": direct_reclaims / elapsed,
+        "fork_rate":          forks / elapsed,
     }
 
 
@@ -119,6 +159,8 @@ def reward_fn(base: dict[str, float], tuned: dict[str, float]) -> tuple[float, d
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--stressor", type=str, required=True,
+                    help='Workload command, e.g. --stressor "stress-ng --vm 2 --vm-bytes 75%"')
     ap.add_argument("--experiments", type=int, default=20)
     ap.add_argument("--duration", type=float, default=10.0)
     ap.add_argument("--loader", type=Path, default=LOADER)
@@ -126,15 +168,27 @@ def main() -> int:
     ap.add_argument("--experiments-path", type=Path, default=EXPERIMENTS)
     args = ap.parse_args()
 
-    tuners   = load_tuners(args.catalog)
-    space    = [Integer(int(t.min_value), int(t.max_value), name=t.id) for t in tuners]
+    stressor_cmd = shlex.split(args.stressor)
+
+    tuners   = load_tuners()
+    space    = [Integer(int(t.min_value), int(t.max_value), name=t.id) for t in tuners] # to feed into the scikit learn optimizer
     baseline = {t.id: int(read_sysctl(sysctl_name_to_path(t.sysctl), t.kind)) for t in tuners}
 
     opt = Optimizer(space, base_estimator="GP", acq_func="EI",
                     n_initial_points=5, random_state=42)
 
-    # Loader is the eBPF metric source — spawn once and keep it running.
-    loader = subprocess.Popen([str(args.loader), str(0)], stdout=subprocess.PIPE)
+    # Stressor lives in its own cgroup; loader whitelists that cgid so eBPF
+    # only collects events generated by the workload — not the whole host.
+    cgroup_dir, cgid = make_cgroup()
+    stressor = subprocess.Popen(stressor_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    (cgroup_dir / "cgroup.procs").write_text(str(stressor.pid))
+
+    # Loader is the eBPF metric source — spawn once with our cgid filter.
+    # stderr → log file so BPF attach failures are diagnosable instead of silent.
+    loader_log = (REPO / "models" / "loader.log").open("a", buffering=1)
+    loader = subprocess.Popen([str(LOADER), str(os.getpid()), str(cgid)],
+                              stdout=subprocess.PIPE, stderr=loader_log)
+    ev_q   = start_reader(loader)
 
     # Append-mode JSONL: every experiment becomes one line for cross-session analysis.
     args.experiments_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,15 +196,18 @@ def main() -> int:
 
     try:
         # Baseline pass with default sysctls — reward is computed as a ratio against this.
-        base = measure(loader, args.duration)
+        base = measure(ev_q, args.duration)
         print(f"[baseline] {base}")
 
         for i in range(args.experiments):
             cfg = opt.ask()
             for t, v in zip(tuners, cfg):
-                write_sysctl(sysctl_name_to_path(t.sysctl), int(v), t.kind)
+                try:
+                    write_sysctl(sysctl_name_to_path(t.sysctl), int(v), t.kind)
+                except OSError as exc:
+                    print(f"  [skip] {t.sysctl}={int(v)} rejected ({exc})")
 
-            tuned          = measure(loader, args.duration)
+            tuned          = measure(ev_q, args.duration)
             reward, parts  = reward_fn(base, tuned)
             opt.tell(cfg, -reward)  # skopt minimises → negate
 
@@ -165,11 +222,17 @@ def main() -> int:
             print(f"[{i+1:3d}/{args.experiments}] reward={reward:+.3f}  ({parts_str})  cfg={cfg}")
     finally:
         series.close()
-        # Always restore sysctls and stop the loader.
+        # Always restore sysctls and stop loader + stressor.
         for t in tuners:
-            write_sysctl(sysctl_name_to_path(t.sysctl), baseline[t.id], t.kind)
-        loader.terminate()
-        loader.wait(timeout=5)
+            try:
+                write_sysctl(sysctl_name_to_path(t.sysctl), baseline[t.id], t.kind)
+            except OSError as exc:
+                print(f"  [skip-restore] {t.sysctl}={baseline[t.id]} ({exc})")
+        loader.terminate(); loader.wait(timeout=5)
+        loader_log.close()
+        stressor.terminate(); stressor.wait(timeout=5)
+        try: cgroup_dir.rmdir()
+        except OSError: pass
 
     best_i = int(np.argmin(opt.yi))
     print(f"\nBest: reward={-opt.yi[best_i]:+.2f}  cfg={opt.Xi[best_i]}")
