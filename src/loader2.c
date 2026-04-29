@@ -3,12 +3,15 @@
  * userspace and emits one compact summary record per WINDOW_NS instead of
  * forwarding every event raw.
  *
- * Per-window summary (24 bytes packed):
+ * Per-window summary (36 bytes packed):
  *     u64 window_end_ns
  *     u32 rq_p95_us
  *     u32 syscall_count
  *     u32 failure_count
- *     u32 _pad
+ *     u32 blk_p95_us
+ *     u32 ctx_switch_count
+ *     u32 direct_reclaim_count
+ *     u32 fork_count
  */
 #include <bpf/libbpf.h>
 #include <stdio.h>
@@ -27,8 +30,12 @@
 #define WINDOW_NS       1000000000ULL  /* 1 second */
 
 /* Must match collector.bpf.c EVENT_* constants. */
-#define EVENT_SYSCALL_EXIT 5
-#define EVENT_RQ_LATENCY   6
+#define EVENT_FORK           2
+#define EVENT_SCHED_SWITCH   4
+#define EVENT_SYSCALL_EXIT   5
+#define EVENT_RQ_LATENCY     6
+#define EVENT_DIRECT_RECLAIM 7
+#define EVENT_BLK_LATENCY    8
 
 /* Mirrors struct payload in collector.bpf.c (48 bytes). */
 struct payload {
@@ -47,7 +54,10 @@ struct summary {
     uint32_t rq_p95_us;
     uint32_t syscall_count;
     uint32_t failure_count;
-    uint32_t _pad;
+    uint32_t blk_p95_us;
+    uint32_t ctx_switch_count;
+    uint32_t direct_reclaim_count;
+    uint32_t fork_count;
 } __attribute__((packed));
 
 static struct collector_bpf *g_skel   = NULL;
@@ -58,9 +68,14 @@ static time_t   last_mtime             = 0;
 /* Per-window aggregation state. */
 static uint32_t rq_lat[MAX_LAT_SAMPLES];
 static int      rq_lat_n         = 0;
+static uint32_t blk_lat[MAX_LAT_SAMPLES];
+static int      blk_lat_n        = 0;
 static uint32_t syscall_count    = 0;
 static uint32_t failure_count    = 0;
-static uint64_t window_start_ns  = 0;
+static uint32_t ctx_switch_count    = 0;
+static uint32_t direct_reclaim_count = 0;
+static uint32_t fork_count        = 0;
+static uint64_t window_start_ns   = 0;
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -73,29 +88,36 @@ static int cmp_u32(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
-/* Sort the rq_lat buffer and return the p95 sample (0 if empty). */
-static uint32_t compute_p95(void) {
-    if (rq_lat_n == 0) return 0;
-    qsort(rq_lat, rq_lat_n, sizeof(rq_lat[0]), cmp_u32);
-    int idx = (int)(0.95 * (rq_lat_n - 1));
-    return rq_lat[idx];
+/* Sort `buf` and return the p95 sample (0 if empty). */
+static uint32_t compute_p95(uint32_t *buf, int n) {
+    if (n == 0) return 0;
+    qsort(buf, n, sizeof(buf[0]), cmp_u32);
+    int idx = (int)(0.95 * (n - 1));
+    return buf[idx];
 }
 
 static void flush_summary(void) {
     struct summary s = {
-        .window_end_ns = now_ns(),
-        .rq_p95_us     = compute_p95(),
-        .syscall_count = syscall_count,
-        .failure_count = failure_count,
-        ._pad          = 0,
+        .window_end_ns        = now_ns(),
+        .rq_p95_us            = compute_p95(rq_lat, rq_lat_n),
+        .syscall_count        = syscall_count,
+        .failure_count        = failure_count,
+        .blk_p95_us           = compute_p95(blk_lat, blk_lat_n),
+        .ctx_switch_count     = ctx_switch_count,
+        .direct_reclaim_count = direct_reclaim_count,
+        .fork_count           = fork_count,
     };
     fwrite(&s, sizeof(s), 1, stdout);
     fflush(stdout);
 
-    rq_lat_n        = 0;
-    syscall_count   = 0;
-    failure_count   = 0;
-    window_start_ns = now_ns();
+    rq_lat_n             = 0;
+    blk_lat_n            = 0;
+    syscall_count        = 0;
+    failure_count        = 0;
+    ctx_switch_count     = 0;
+    direct_reclaim_count = 0;
+    fork_count           = 0;
+    window_start_ns      = now_ns();
 }
 
 static void add_cgid(uint64_t cgid) {
@@ -133,6 +155,19 @@ static int handle_event(void *ctx, void *data, size_t data_size) {
     case EVENT_RQ_LATENCY:
         if (rq_lat_n < MAX_LAT_SAMPLES)
             rq_lat[rq_lat_n++] = p->value_u32;
+        break;
+    case EVENT_BLK_LATENCY:
+        if (blk_lat_n < MAX_LAT_SAMPLES)
+            blk_lat[blk_lat_n++] = p->value_u32;
+        break;
+    case EVENT_SCHED_SWITCH:
+        ctx_switch_count++;
+        break;
+    case EVENT_DIRECT_RECLAIM:
+        direct_reclaim_count++;
+        break;
+    case EVENT_FORK:
+        fork_count++;
         break;
     default:
         break;

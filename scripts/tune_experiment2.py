@@ -40,8 +40,9 @@ CATALOG      = REPO / "configs" / "tuner_catalog.yaml"
 EXPERIMENTS  = REPO / "models" / "experiments.jsonl"
 
 # struct summary from src/loader2.c (1 record/sec):
-#   window_end_ns u64, rq_p95_us u32, syscall_count u32, failure_count u32, _pad u32
-SUMMARY_FMT  = "=QIIII"
+#   window_end_ns u64, rq_p95_us u32, syscall_count u32, failure_count u32,
+#   blk_p95_us u32, ctx_switch_count u32, direct_reclaim_count u32, fork_count u32
+SUMMARY_FMT  = "=QIIIIIII"
 SUMMARY_SIZE = struct.calcsize(SUMMARY_FMT)
 
 
@@ -92,9 +93,13 @@ def start_reader(loader: subprocess.Popen) -> queue.Queue:
 def measure(ev_q: queue.Queue, seconds: float) -> dict[str, float]:
     """Pull 1Hz summary records for `seconds`; return aggregated metrics for the reward function."""
     deadline = time.time() + seconds
-    rq_p95s: list[int]   = []
-    syscalls             = 0
-    fails                = 0
+    rq_p95s: list[int]  = []
+    blk_p95s: list[int] = []
+    syscalls            = 0
+    fails               = 0
+    ctx_switches        = 0
+    direct_reclaims     = 0
+    forks               = 0
     psi_mem = _psi_some_avg10("memory")
     psi_io  = _psi_some_avg10("io")
     psi_cpu = _psi_some_avg10("cpu")
@@ -104,26 +109,37 @@ def measure(ev_q: queue.Queue, seconds: float) -> dict[str, float]:
         if remaining <= 0:
             break
         try:
-            _ts, rq_p95_us, sys_n, fail_n, _pad = ev_q.get(timeout=remaining)
+            (_ts, rq_p95_us, sys_n, fail_n,
+             blk_p95_us, ctx_n, reclaim_n, fork_n) = ev_q.get(timeout=remaining)
         except queue.Empty:
             break
         if rq_p95_us:
             rq_p95s.append(rq_p95_us)
-        syscalls += sys_n
-        fails    += fail_n
+        if blk_p95_us:
+            blk_p95s.append(blk_p95_us)
+        syscalls        += sys_n
+        fails           += fail_n
+        ctx_switches    += ctx_n
+        direct_reclaims += reclaim_n
+        forks           += fork_n
     elapsed = max(time.time() - t0, 1e-6)
     # Average PSI across the window: pre + post / 2 is good enough for a noisy signal.
     psi_mem = (psi_mem + _psi_some_avg10("memory")) / 2.0
     psi_io  = (psi_io  + _psi_some_avg10("io"))     / 2.0
     psi_cpu = (psi_cpu + _psi_some_avg10("cpu"))    / 2.0
     return {
-        # Average of per-second p95s — stable signal across the window.
+        # Reward-function features (don't change names — reward_fn reads these).
         "p95_latency": float(np.mean(rq_p95s)) if rq_p95s else 0.0,
         "throughput":  syscalls / elapsed,
         "mem":         psi_mem,
         "io":          psi_io,
         "cpu":         psi_cpu,
         "failures":    fails / elapsed,
+        # Extra clustering-only features. Reward function ignores these.
+        "blk_p95_latency":    float(np.mean(blk_p95s)) if blk_p95s else 0.0,
+        "ctx_switch_rate":    ctx_switches / elapsed,
+        "direct_reclaim_rate": direct_reclaims / elapsed,
+        "fork_rate":          forks / elapsed,
     }
 
 

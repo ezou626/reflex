@@ -31,12 +31,16 @@ N_CANDIDATES = 2000 # random search over the GP mean per cluster
 # driven by the largest-magnitude dimension. Divide-and-clamp puts every
 # feature into [0,1]. The runtime classifier must apply the same divisors.
 NORMS: dict[str, float] = {
-    "p95_latency": 10_000.0,
-    "throughput":  10_000.0,
-    "mem":         100.0,
-    "io":          100.0,
-    "cpu":         100.0,
-    "failures":    100.0,
+    "p95_latency":         10_000.0,
+    "throughput":          10_000.0,
+    "mem":                 100.0,
+    "io":                  100.0,
+    "cpu":                 100.0,
+    "failures":            100.0,
+    "blk_p95_latency":     50_000.0,
+    "ctx_switch_rate":     100_000.0,
+    "direct_reclaim_rate": 100.0,
+    "fork_rate":           1_000.0,
 }
 
 sys.path.insert(0, str(REPO / "daemon"))
