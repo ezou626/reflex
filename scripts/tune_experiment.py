@@ -71,18 +71,16 @@ def load_reward_weights(path: Path) -> dict[str, float]:
         raise ValueError(f"reward_weights.yaml missing keys: {missing}")
     return {k: float(raw[k]) for k in keys}
 
-JOINT_TUNER_IDS = [
-    # memory reclaim
-    "sysctl_vm_swappiness",
-    "sysctl_vm_dirty_ratio",
-    "sysctl_vm_dirty_background_ratio",
-    "sysctl_vm_vfs_cache_pressure",
-    "sysctl_vm_watermark_scale_factor",
-    "sysctl_vm_min_free_kbytes",
-    # cpu scheduler
-    "sysctl_kernel_sched_cfs_bandwidth_slice_us",
-    "sysctl_kernel_sched_autogroup_enabled",
-]
+def _tunable_entries(catalog_path: Path) -> list[Any]:
+    cat = load_tuner_catalog(catalog_path)
+    return [
+        e for e in cat.tuners
+        if e.enabled
+        and e.scope == "runtime_sysctl"
+        and e.kind == "int"
+        and e.min_value is not None
+        and e.max_value is not None
+    ]
 
 # Feature space for clustering. Must stay in sync with
 # _FEATURE_MAP in daemon/control/workload_classifier.py.
@@ -99,21 +97,11 @@ _FEATURE_MAP: list[tuple[str, float]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Daemon integration
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Cgroup helpers — mirror what run.sh does for the always-on daemon
-# ---------------------------------------------------------------------------
-
+"""
+Runs the specific workload in a new cgroup to whitelist for the BPF metric collection
+Returns (cgroup_dir, cgroup_id) or (None, none)
+"""
 def _create_stressor_cgroup() -> tuple[Path | None, int | None]:
-    """
-    Create a dedicated cgroup for the stressor process.
-    Returns (cgroup_dir, cgroup_id) or (None, None) on failure.
-    The cgroup ID (inode number of the cgroup dir) is what the eBPF
-    whitelist uses to filter events to only this workload.
-    """
     cgroup_dir = Path(f"/sys/fs/cgroup/reflex_tune_{os.getpid()}")
     try:
         cgroup_dir.mkdir(exist_ok=True)
@@ -123,7 +111,9 @@ def _create_stressor_cgroup() -> tuple[Path | None, int | None]:
         print(f"  [warn] cgroup creation failed ({e}) — eBPF will track all processes")
         return None, None
 
-
+"""
+Takes pid of process passed to function and puts in cgroup created
+"""
 def _move_to_cgroup(pid: int, cgroup_dir: Path) -> None:
     try:
         (cgroup_dir / "cgroup.procs").write_text(str(pid), encoding="utf-8")
@@ -167,7 +157,7 @@ class DaemonContext:
         cmd = [
             sys.executable, str(daemon_main),
             "--summary-output", str(self.summary_path),
-            "--dry-run",          # daemon must not apply sysctl changes
+            "--dry-run",          # dry run flag means no sysctl changes applied
             "--window-sec", "2",
             "--proc-sample-sec", "2",
         ]
@@ -264,6 +254,26 @@ def metrics_to_feature_vec(summary: dict[str, Any]) -> list[float]:
     return [min(_get_val(summary, k) / norm, 1.0) for k, norm in _FEATURE_MAP]
 
 
+def compute_absolute_reward(summary: dict[str, Any], weights: dict[str, float]) -> float:
+    """Scalar reward from an averaged daemon summary. Higher is better."""
+    rq_lat    = min(_get_val(summary, "rq_latency_p95_us")           / 10_000.0, 1.0)
+    dr_rate   = min(_get_val(summary, "direct_reclaim_rate_per_sec") / 100.0,    1.0)
+    cpu       = min(_get_val(summary, "host_cpu_busy_ratio"),                     1.0)
+    dirty     = min(_get_val(summary, "host_dirty_kb")               / 200_000.0, 1.0)
+    mem_avail = _get_val(summary, "host_mem_available_ratio")
+
+    return round(
+        weights["mem_avail"]       * mem_avail
+        + weights["rq_latency"]    * rq_lat
+        + weights["direct_reclaim"]* dr_rate
+        + weights["cpu_busy"]      * cpu
+        + weights["dirty"]         * dirty,
+        6,
+    )
+
+"""
+New scalar reward function
+"""
 def compute_absolute_reward(summary: dict[str, Any], weights: dict[str, float]) -> float:
     """Scalar reward from an averaged daemon summary. Higher is better."""
     rq_lat    = min(_get_val(summary, "rq_latency_p95_us")           / 10_000.0, 1.0)
@@ -473,17 +483,10 @@ class ExperimentRunner:
         key = _stressor_key(stressor_cmd)
         self.model_path = model_dir / f"gp_{key}.pkl"
 
-        catalog = load_tuner_catalog(catalog_path)
-        by_id = {e.id: e for e in catalog.tuners}
-        self.entries = [
-            by_id[tid] for tid in JOINT_TUNER_IDS
-            if tid in by_id
-            and by_id[tid].min_value is not None
-            and by_id[tid].max_value is not None
-        ]
+        self.entries = _tunable_entries(catalog_path)
         if not self.entries:
             raise RuntimeError(
-                "No tuners with min_value/max_value found in catalog."
+                "No enabled runtime_sysctl int tuners with min_value/max_value found in catalog."
             )
 
         self.baseline: dict[str, int] = {
