@@ -42,6 +42,7 @@ class ContextualBanditController:
         reward_window: int = 3,
         baseline_windows: int = 3,
         max_steps_per_run: int = 1,
+        negative_cooldown_windows: int = 3,
         library_path: Path | None = None,
         rng: random.Random | None = None,
         max_history: int = 120,
@@ -55,6 +56,7 @@ class ContextualBanditController:
         self.reward_window = max(1, reward_window)
         self.baseline_windows = max(1, baseline_windows)
         self.max_steps_per_run = max(1, max_steps_per_run)
+        self.negative_cooldown_windows = max(0, negative_cooldown_windows)
         self.feature_keys, self.feature_norms = _load_feature_schema(library_path or DEFAULT_LIBRARY_PATH)
         self.rng = rng or random.Random()
         self.max_history = max_history
@@ -63,6 +65,7 @@ class ContextualBanditController:
         self._pending_action_key: str | None = None
         self._pending_context: list[float] | None = None
         self._weights: dict[str, np.ndarray] = {}
+        self._banned_until: dict[str, int] = {}
         self._load_state()
 
     async def accept_data(self, sample: AggregatorSample) -> None:
@@ -102,15 +105,21 @@ class ContextualBanditController:
         vals.append(1.0)
         return np.array(vals, dtype=np.float64)
 
+    def _action_context(self, candidate: ActionCandidate, context: np.ndarray) -> np.ndarray:
+        value_feature = 0.0
+        if candidate.current_value is not None:
+            value_feature = max(0.0, min(float(candidate.current_value) / 1_000_000.0, 1.0))
+        return np.append(context, value_feature)
+
     def _action_space(self) -> dict[str, ActionCandidate]:
         out: dict[str, ActionCandidate] = {"noop": noop_candidate("no improvement expected")}
         for tuner in eligible_tuners(self.registry, self._current_summary()):
             inc = build_step_candidate(tuner, "increase", reason="bandit one-step increase", priority=55)
             dec = build_step_candidate(tuner, "decrease", reason="bandit one-step decrease", priority=55)
             if inc.action is not None:
-                out[f"{inc.action.tuner_id}:increase"] = inc
+                out[f"{inc.action.tuner_id}:increase:{_current_bin(inc.current_value, tuner.min_value, tuner.step)}"] = inc
             if dec.action is not None:
-                out[f"{dec.action.tuner_id}:decrease"] = dec
+                out[f"{dec.action.tuner_id}:decrease:{_current_bin(dec.current_value, tuner.min_value, tuner.step)}"] = dec
         return out
 
     def _weights_for(self, key: str, width: int) -> np.ndarray:
@@ -121,12 +130,23 @@ class ContextualBanditController:
         return weights
 
     def _select(self, actions: dict[str, ActionCandidate], context: np.ndarray) -> tuple[str, ActionCandidate]:
-        keys = sorted(actions)
+        sample_id = self._latest_sample_id()
+        keys = sorted(key for key in actions if self._banned_until.get(key, 0) <= sample_id)
+        if not keys:
+            return "noop", actions["noop"]
         if self.rng.random() < self.epsilon:
             key = self.rng.choice(keys)
             return key, actions[key]
         scored = [
-            (float(np.dot(self._weights_for(key, len(context)), context)), key)
+            (
+                float(
+                    np.dot(
+                        self._weights_for(key, len(self._action_context(actions[key], context))),
+                        self._action_context(actions[key], context),
+                    )
+                ),
+                key,
+            )
             for key in keys
         ]
         _, key = max(scored)
@@ -156,6 +176,7 @@ class ContextualBanditController:
         actions = self._action_space()
         context = self._context()
         action_key, candidate = self._select(actions, context)
+        action_context = self._action_context(candidate, context)
         reward_before = self._reward()
         latest_id = self._latest_sample_id()
         self.pending = PendingAction(
@@ -168,7 +189,7 @@ class ContextualBanditController:
             evaluation_due_at_sample_id=latest_id + self.evaluate_after_windows,
         )
         self._pending_action_key = action_key
-        self._pending_context = context.tolist()
+        self._pending_context = action_context.tolist()
         await ctx.log_decision(
             "bandit",
             "bandit selected action",
@@ -177,7 +198,11 @@ class ContextualBanditController:
                 candidate=candidate,
                 reward_before=reward_before,
                 pending_action=self.pending,
-                extra={"action_key": action_key, "context": context.tolist()},
+                extra={
+                    "action_key": action_key,
+                    "context": action_context.tolist(),
+                    "banned_until": self._banned_until,
+                },
             ),
         )
         if candidate.action is not None:
@@ -210,8 +235,9 @@ class ContextualBanditController:
         action_key = self._pending_action_key or "noop"
         weights = self._weights_for(action_key, len(context))
         predicted = float(np.dot(weights, context))
-        target = reward_after.total_reward
+        target = reward_after.total_reward - self.pending.reward_before
         weights += self.alpha * (target - predicted) * context
+        prediction_after = float(np.dot(weights, context))
         candidate = ActionCandidate(
             action=None,
             direction="noop",
@@ -219,7 +245,9 @@ class ContextualBanditController:
             candidate_value=self.pending.new_value,
             reason="bandit reward update",
         )
-        accepted = reward_after.total_reward >= self.pending.reward_before
+        accepted = target >= 0.0
+        if not accepted and self.negative_cooldown_windows > 0:
+            self._banned_until[action_key] = self._latest_sample_id() + self.negative_cooldown_windows
         await ctx.log_decision(
             "bandit",
             "bandit evaluation complete",
@@ -232,8 +260,11 @@ class ContextualBanditController:
                 pending_action=self.pending,
                 extra={
                     "action_key": action_key,
+                    "target_delta": target,
                     "prediction_before_update": predicted,
+                    "prediction_after_update": prediction_after,
                     "alpha": self.alpha,
+                    "banned_until": self._banned_until.get(action_key),
                 },
             ),
         )
@@ -253,6 +284,9 @@ class ContextualBanditController:
                 for k, v in weights.items()
                 if isinstance(v, list)
             }
+        banned = raw.get("banned_until", {})
+        if isinstance(banned, dict):
+            self._banned_until = {str(k): int(v) for k, v in banned.items()}
 
     def _save_state(self) -> None:
         if self.state_path is None:
@@ -264,6 +298,7 @@ class ContextualBanditController:
                 "pending_action": self.pending.log_payload() if self.pending else None,
                 "pending_action_key": self._pending_action_key,
                 "pending_context": self._pending_context,
+                "banned_until": self._banned_until,
             },
         )
 
@@ -285,6 +320,12 @@ def _load_feature_schema(path: Path) -> tuple[list[str], list[float]]:
         if isinstance(keys, list) and isinstance(norms, list) and len(keys) == len(norms):
             return [str(k) for k in keys], [float(n) for n in norms]
     return [], []
+
+
+def _current_bin(value: int | None, min_value: int, step: int) -> int:
+    if value is None:
+        return -1
+    return int((value - min_value) // max(1, step))
 
 
 __all__ = ["ContextualBanditController"]

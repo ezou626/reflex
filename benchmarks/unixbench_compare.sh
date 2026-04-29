@@ -113,8 +113,14 @@ run_bench() {
         local cgid
         cgid=$(stat -c %i "$cgdir")
 
+        local openai_env=()
+        if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            openai_env=("OPENAI_API_KEY=${OPENAI_API_KEY}")
+        fi
+
         # 2. Start daemon_core implementation.
         sudo env "PATH=${PATH}" "UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/uv-cache}" \
+            "${openai_env[@]}" \
             "${UV_BIN}" run python -m implementations.main \
             --no-sudo \
             --run-id "unixbench-$mode" \

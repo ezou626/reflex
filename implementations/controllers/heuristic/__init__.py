@@ -23,22 +23,42 @@ class HeuristicController:
         high_mem_ratio: float = 0.35,
         high_dirty_kb: float = 50_000.0,
         low_dirty_kb: float = 1_000.0,
-        max_history: int = 60,
     ) -> None:
         self.registry = registry
         self.low_mem_ratio = low_mem_ratio
         self.high_mem_ratio = high_mem_ratio
         self.high_dirty_kb = high_dirty_kb
         self.low_dirty_kb = low_dirty_kb
-        self.history: list[dict[str, Any]] = []
-        self.max_history = max_history
+        self.current_summary: dict[str, Any] | None = None
 
     async def accept_data(self, sample: AggregatorSample) -> None:
         summary = _summary_from_sample(sample)
         if summary is None:
             return
-        self.history.append(summary)
-        self.history = self.history[-self.max_history :]
+        self.current_summary = summary
+
+    def _decision_snapshot(self, summary: dict[str, Any]) -> dict[str, Any]:
+        host = summary.get("host_features", {})
+        return {
+            "summary": summary,
+            "host_features": {
+                "host_mem_available_ratio": host.get("host_mem_available_ratio"),
+                "host_swap_free_ratio": host.get("host_swap_free_ratio"),
+                "host_dirty_kb": host.get("host_dirty_kb"),
+                "host_cpu_busy_ratio": host.get("host_cpu_busy_ratio"),
+            },
+            "sysctls": {
+                "vm.swappiness": self._read_int("vm.swappiness"),
+                "vm.dirty_ratio": self._read_int("vm.dirty_ratio"),
+                "vm.vfs_cache_pressure": self._read_int("vm.vfs_cache_pressure"),
+            },
+            "thresholds": {
+                "low_mem_ratio": self.low_mem_ratio,
+                "high_mem_ratio": self.high_mem_ratio,
+                "high_dirty_kb": self.high_dirty_kb,
+                "low_dirty_kb": self.low_dirty_kb,
+            },
+        }
 
     def _read_int(self, sysctl_name: str) -> int | None:
         try:
@@ -136,15 +156,24 @@ class HeuristicController:
         return actions
 
     async def run(self, ctx: ControllerRunContext) -> None:
-        if not self.history:
+        if self.current_summary is None:
             await ctx.log_decision("heuristic", "no summaries available", {})
             return
-        summary = self.history[-1]
-        actions = self.propose(summary)
+        snapshot = self._decision_snapshot(self.current_summary)
+        await ctx.log_decision(
+            "heuristic",
+            "heuristic input snapshot",
+            snapshot,
+        )
+        actions = self.propose(self.current_summary)
         await ctx.log_decision(
             "heuristic",
             "heuristic proposal pass complete",
-            {"actions": len(actions), "trigger_reason": ctx.trigger.reason},
+            {
+                "actions": len(actions),
+                "trigger_reason": ctx.trigger.reason,
+                "decision_inputs": snapshot,
+            },
         )
         sorted_actions = sorted(actions, key=lambda a: a.priority, reverse=True)
         if sorted_actions:

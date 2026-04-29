@@ -254,13 +254,16 @@ class HillClimbController:
             self.temperature,
             self.rng,
         )
-        candidate = ActionCandidate(
-            action=self.pending.rollback_action,
-            direction="noop" if accepted or self.pending.rollback_action is None else "decrease",
-            current_value=self.pending.new_value,
-            candidate_value=self.pending.prev_value,
-            reason="accepted candidate" if accepted else "rollback triggered",
-        )
+        if accepted:
+            candidate = noop_candidate("accepted candidate")
+        else:
+            candidate = ActionCandidate(
+                action=self.pending.rollback_action,
+                direction="decrease",
+                current_value=self.pending.new_value,
+                candidate_value=self.pending.prev_value,
+                reason="rollback triggered",
+            )
         if accepted:
             self.best_reward = max(self.best_reward or reward_after.total_reward, reward_after.total_reward)
             if self.pending.tuner_id is not None and self.pending.new_value is not None:

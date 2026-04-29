@@ -25,7 +25,7 @@ param(
     [int]$SshPort = 52222,
     [int]$DiskGB = 24,
     [int]$MemoryMB = 4096,
-    [int]$Cpus = 2,
+    [int]$Cpus = 6,
     [string]$CacheDir = "",
     [string]$OpenAIApiKey = "",
     [string]$UbuntuImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
@@ -205,6 +205,7 @@ $Key = Join-Path $CacheDir "id_ed25519"
 $pub = "$Key.pub"
 $KnownHosts = Join-Path $CacheDir "known_hosts.unixbench.$PID"
 $repoZip = Join-Path $CacheDir "reflex-$PID.zip"
+$runRootFile = Join-Path $CacheDir "unixbench-run-root-$PID.txt"
 
 if (-not (Test-Path $Key)) {
     Write-Step "Generating SSH key: $Key"
@@ -384,7 +385,7 @@ unzip -q -o /home/ubuntu/reflex.zip -d /home/ubuntu/reflex
 find /home/ubuntu/reflex -name "*.sh" -exec sed -i 's/\r//' {} +
 cd /home/ubuntu/reflex
 uv venv --system-site-packages --allow-existing
-uv sync
+uv sync --extra openai
 
 BPFTOOL_BIN="$(command -v bpftool || true)"
 if [[ -z "$BPFTOOL_BIN" ]]; then
@@ -403,7 +404,9 @@ if [[ ! -x "$UNIXBENCH_DIR/UnixBench/Run" ]]; then
   git clone --depth 1 "__UNIXBENCH_URL__" "$UNIXBENCH_DIR"
 fi
 
-UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" bash benchmarks/unixbench_compare.sh --modes "__MODES__" __SUITE__ __DRYRUN__
+RUN_ROOT="/home/ubuntu/reflex/data/runs/unixbench-$(date +%Y%m%d-%H%M%S)"
+UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" RUN_ROOT="$RUN_ROOT" bash benchmarks/unixbench_compare.sh --modes "__MODES__" __SUITE__ __DRYRUN__
+printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
 '@
     $suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
     $dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
@@ -424,16 +427,31 @@ UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" bash benchmarks/unixbench_compare.sh --
     & scp -r -i $Key -P $SshPort `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
-        ubuntu@127.0.0.1:/home/ubuntu/reflex/data/runs/* `
+        ubuntu@127.0.0.1:/home/ubuntu/reflex/data/last_unixbench_run_root.txt `
+        $runRootFile
+    if ($LASTEXITCODE -ne 0) {
+        throw "scp last_unixbench_run_root.txt failed"
+    }
+
+    $guestRunRoot = (Get-Content -Raw $runRootFile).Trim()
+    if ([string]::IsNullOrWhiteSpace($guestRunRoot)) {
+        throw "Could not determine guest run root"
+    }
+    $runName = Split-Path -Leaf $guestRunRoot
+
+    & scp -r -i $Key -P $SshPort `
+        -o StrictHostKeyChecking=yes `
+        -o UserKnownHostsFile="$KnownHosts" `
+        "ubuntu@127.0.0.1:$guestRunRoot" `
         (Join-Path $repoRoot "data\runs\")
     if ($LASTEXITCODE -ne 0) {
-        throw "scp data/runs failed"
+        throw "scp run dir failed: $guestRunRoot"
     }
 
     Write-Step "Done"
     Write-Host "Results:"
     Write-Host "  data\unixbench_results.csv"
-    Write-Host "  data\runs\unixbench-<timestamp>\"
+    Write-Host "  data\runs\$runName\"
 }
 finally {
     if (-not $KeepVm -and $qemuProc -and -not $qemuProc.HasExited) {
@@ -441,7 +459,7 @@ finally {
         Stop-Process -Id $qemuProc.Id -Force
     }
     if (-not $KeepVm) {
-        Remove-Item -Force $overlay, $seedIso, $repoZip, $KnownHosts -ErrorAction SilentlyContinue
+        Remove-Item -Force $overlay, $seedIso, $repoZip, $KnownHosts, $runRootFile -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $seedDir -ErrorAction SilentlyContinue
     } else {
         Write-Step "Keeping VM artifacts in $CacheDir"

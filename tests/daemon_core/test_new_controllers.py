@@ -8,6 +8,7 @@ from daemon_core import AggregatorSample
 from daemon_core.tuners.schema import TunerCatalogEntry
 from daemon_core.tuners.sysctl import GenericSysctlTuner
 from daemon_core.tuners.registry import TunerRegistry
+from implementations.controllers.bandit import ContextualBanditController
 from implementations.controllers.hillclimb import HillClimbController
 from implementations.controllers.openai import OpenAITuningController
 from implementations.controllers.tuning_shared import (
@@ -160,5 +161,65 @@ def test_hillclimb_exposes_pending_action_and_blocks_overlap(monkeypatch: Any) -
         assert len(ctx.executors) == 1
         assert ctx.decisions[-1][2]["pending_action"]["evaluation_due_at_sample_id"] == 4
         assert "awaiting evaluation" in ctx.decisions[-1][1]
+
+    asyncio.run(scenario())
+
+
+def test_hillclimb_accepted_evaluation_logs_noop_not_rollback(monkeypatch: Any) -> None:
+    async def scenario() -> None:
+        registry = _registry()
+        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
+        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        controller = HillClimbController(
+            registry,
+            interval_windows=1,
+            evaluate_after_windows=1,
+            baseline_windows=1,
+            epsilon=0.0,
+        )
+        ctx = FakeContext()
+        await controller.accept_data(AggregatorSample(1, 0.0, _summary()))
+        await controller.run(ctx)
+        await controller.accept_data(AggregatorSample(2, 0.0, _summary(mem=0.9, latency=100.0)))
+        await controller.run(ctx)
+
+        metadata = ctx.decisions[-1][2]
+        assert "evaluation complete" in ctx.decisions[-1][1]
+        assert metadata["accepted"] is True
+        assert metadata["action"] == "noop"
+        assert metadata["reason"] == "accepted candidate"
+        assert len(ctx.executors) == 1
+
+    asyncio.run(scenario())
+
+
+def test_bandit_learns_delta_not_absolute_reward_and_cools_negative_action(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        registry = _registry()
+        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
+        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        controller = ContextualBanditController(
+            registry,
+            alpha=1.0,
+            epsilon=0.0,
+            evaluate_after_windows=1,
+            baseline_windows=1,
+            library_path=tmp_path / "missing.json",
+            negative_cooldown_windows=4,
+        )
+        ctx = FakeContext()
+        await controller.accept_data(AggregatorSample(1, 0.0, _summary(mem=1.0, latency=0.0)))
+        await controller.run(ctx)
+        await controller.accept_data(AggregatorSample(2, 0.0, _summary(mem=0.1, latency=9000.0)))
+        await controller.run(ctx)
+
+        metadata = ctx.decisions[-1][2]
+        assert metadata["accepted"] is False
+        assert metadata["target_delta"] < 0.0
+        assert metadata["prediction_after_update"] < 0.0
+        assert metadata["banned_until"] == 6
 
     asyncio.run(scenario())

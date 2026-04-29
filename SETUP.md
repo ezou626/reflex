@@ -1,5 +1,12 @@
 # Reflex Setup Instructions
 
+## How to Run Quickly
+
+```bash
+./scripts/setup_dev_env.sh
+./benchmarks/unixbench_qemu.sh
+```
+
 Please ensure you are running a ubuntu VM with root access (recommend QEMU, can set up with multipass). Dependencies are listed in `setup.sh`
 
 This project aims to follow a multi-step approach, combining work from KConfigTune and KernTune to create a pre-trained workload-optimized tuning setup for Linux,
