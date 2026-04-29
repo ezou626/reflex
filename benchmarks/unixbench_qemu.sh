@@ -54,8 +54,34 @@ need_cmd qemu-img
 need_cmd ssh
 need_cmd ssh-keygen
 
+if [[ ! -e /dev/kvm ]] && command -v modprobe >/dev/null 2>&1; then
+  if grep -Eq 'vmx|svm' /proc/cpuinfo 2>/dev/null; then
+    if grep -Eq 'vmx' /proc/cpuinfo 2>/dev/null; then
+      modprobe kvm_intel 2>/dev/null || true
+    else
+      modprobe kvm_amd 2>/dev/null || true
+    fi
+  fi
+fi
+
+if [[ ! -e /dev/kvm ]]; then
+  cat >&2 <<'EOF'
+error: /dev/kvm does not exist.
+
+This host is not exposing KVM. Check:
+  ls -l /dev/kvm
+  grep -E 'vmx|svm' /proc/cpuinfo | head
+  sudo modprobe kvm_intel   # Intel
+  sudo modprobe kvm_amd     # AMD
+
+If this host itself is a VM, nested virtualization may need to be enabled by
+the host/hypervisor provider.
+EOF
+  exit 1
+fi
+
 if [[ ! -r /dev/kvm ]]; then
-  echo "error: cannot read /dev/kvm. Add your user to kvm or run with sudo." >&2
+  echo "error: cannot read /dev/kvm. Add your user to kvm or run this script with sudo." >&2
   exit 1
 fi
 
