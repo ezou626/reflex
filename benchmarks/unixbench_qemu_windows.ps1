@@ -218,9 +218,9 @@ try {
     }
 
     Write-Step "Running guest setup and UnixBench comparison"
-    $guestScript = @"
+    $guestScript = @'
 set -euo pipefail
-export PATH="\$HOME/.local/bin:\$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 
 wait_for_apt() {
   if command -v cloud-init >/dev/null 2>&1; then
@@ -228,8 +228,8 @@ wait_for_apt() {
   fi
   local n=0
   while sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
-    n=\$((n + 1))
-    if [[ "\$n" -gt 90 ]]; then
+    n=$((n + 1))
+    if [[ "$n" -gt 90 ]]; then
       echo "error: apt/dpkg locks still held" >&2
       exit 1
     fi
@@ -243,7 +243,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential clang libbpf-dev bpfcc-tools python3-bpfcc \
   git make perl curl ca-certificates unzip linux-tools-common >/dev/null
 if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  "linux-headers-\$(uname -r)" "linux-tools-\$(uname -r)" >/dev/null; then
+  "linux-headers-$(uname -r)" "linux-tools-$(uname -r)" >/dev/null; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     linux-headers-generic linux-tools-generic >/dev/null
 fi
@@ -251,7 +251,7 @@ sudo apt-get clean
 
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="\$HOME/.local/bin:\$PATH"
+  export PATH="$HOME/.local/bin:$PATH"
 fi
 
 rm -rf /home/ubuntu/reflex
@@ -261,24 +261,25 @@ cd /home/ubuntu/reflex
 uv venv --system-site-packages --allow-existing
 uv sync
 
-BPFTOOL_BIN="\$(command -v bpftool || true)"
-if [[ -z "\$BPFTOOL_BIN" ]]; then
-  BPFTOOL_BIN="\$(find /usr/lib/linux-tools -type f -name bpftool 2>/dev/null | head -1 || true)"
+BPFTOOL_BIN="$(command -v bpftool || true)"
+if [[ -z "$BPFTOOL_BIN" ]]; then
+  BPFTOOL_BIN="$(find /usr/lib/linux-tools -type f -name bpftool 2>/dev/null | head -1 || true)"
 fi
-if [[ -z "\$BPFTOOL_BIN" ]]; then
+if [[ -z "$BPFTOOL_BIN" ]]; then
   echo "error: bpftool not found" >&2
   exit 1
 fi
-make -C implementations/ebpf BPFTOOL="\$BPFTOOL_BIN"
+make -C implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 
-UNIXBENCH_DIR="\$HOME/byte-unixbench"
-if [[ ! -x "\$UNIXBENCH_DIR/UnixBench/Run" ]]; then
-  rm -rf "\$UNIXBENCH_DIR"
-  git clone --depth 1 "$UnixBenchUrl" "\$UNIXBENCH_DIR"
+UNIXBENCH_DIR="$HOME/byte-unixbench"
+if [[ ! -x "$UNIXBENCH_DIR/UnixBench/Run" ]]; then
+  rm -rf "$UNIXBENCH_DIR"
+  git clone --depth 1 "__UNIXBENCH_URL__" "$UNIXBENCH_DIR"
 fi
 
-UNIXBENCH="\$UNIXBENCH_DIR/UnixBench/Run" MODES="$Modes" bash benchmarks/unixbench_compare.sh
-"@
+UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" MODES="__MODES__" bash benchmarks/unixbench_compare.sh
+'@
+    $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes)
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
     Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_unixbench.sh && bash /home/ubuntu/run_reflex_unixbench.sh"
 
