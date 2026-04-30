@@ -8,3 +8,4 @@ src/vmlinux.h
 __pycache__/
 models/*.pkl
 .codex
+.vscode
