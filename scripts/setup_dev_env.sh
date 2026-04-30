@@ -29,14 +29,23 @@ echo "[reflex] Installing system dependencies via apt..."
 sudo apt-get update -y
 # Base packages common to all environments
 COMMON_PKGS=(
+  auditd
   build-essential
   clang
+  llvm
   libbpf-dev
+  libelf-dev
+  zlib1g-dev
+  pkg-config
   bpfcc-tools
   python3-bpfcc
+  libbpfcc-dev
   cloud-image-utils
   stress-ng
   fio
+  sysbench
+  ffmpeg
+  blender
   qemu-system-x86
 )
 
