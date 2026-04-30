@@ -8,6 +8,8 @@ Aiming to improve system performance as measured by Unixbench, sysbench (WIP), a
 
 ## How to Run
 
+We use `uv` to manage the Python environment.
+
 1. Setup your environment [here](./SETUP.md)
 
 ## Directory

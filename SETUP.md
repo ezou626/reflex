@@ -6,13 +6,13 @@ This will help you run a benchmark. Please ensure you have root access.
 
 ### Linux/MacOS
 
-KVM is needed
+KVM/HVF is needed for practical QEMU performance.
 
 ```bash
 # bash
-./scripts/setup_dev_env.sh
-# run unixbench benchmark
-./benchmarks/unixbench_qemu.sh
+./scripts/setup.sh
+# start the QEMU VM and run the configured mode
+bash ./scripts/run_in_qemu.sh --modes heuristic
 ```
 
 ### Windows
@@ -22,8 +22,8 @@ Hardware virtualization needed
 ```powershell
 # windows
 .\scripts\setup.ps1
-# run unixbench benchmark
-powershell -ExecutionPolicy Bypass -File .\benchmarks\unixbench_qemu.ps1 -Modes "classifier,heuristic"
+# start the QEMU VM and run the configured mode
+powershell -ExecutionPolicy Bypass -File .\scripts\run_in_qemu.ps1 -Modes "heuristic"
 ```
 
 ### Description

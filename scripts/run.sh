@@ -129,8 +129,8 @@ if [ -n "$STRESSOR_CMD" ]; then
     launch_cmd_in_cgroup "$STRESSOR_CMD" /sys/fs/cgroup/reflex_stressor
 fi
 
-VENV_PYTHON="$(dirname "$0")/.venv/bin/python3"
-PYTHON="${VENV_PYTHON:-python3}"
-DAEMON_ARGS=()
-[ $VERBOSE -eq 1 ] && DAEMON_ARGS+=(--classify-only)
-sudo "$PYTHON" daemon/main.py "${DAEMON_ARGS[@]}"
+VENV_PYTHON="$(cd "$(dirname "$0")/.." && pwd)/.venv/bin/python3"
+[ -x "$VENV_PYTHON" ] && PYTHON="$VENV_PYTHON" || PYTHON="python3"
+DAEMON_ARGS=(--no-sudo)
+[ $VERBOSE -eq 1 ] && DAEMON_ARGS+=(--dry-run)
+sudo "$PYTHON" src/reflex/implementations/main.py "${DAEMON_ARGS[@]}" heuristic

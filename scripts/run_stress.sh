@@ -3,6 +3,7 @@
 # Each stressor runs alone for $HOLD seconds, then is killed before the next starts.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOLD="${HOLD:-30}"
 
 run() {
@@ -10,7 +11,7 @@ run() {
     echo "============================================================"
     echo "  $cmd"
     echo "============================================================"
-    sudo ./stressor.sh "$cmd"
+    sudo "${SCRIPT_DIR}/stressor.sh" "$cmd"
     sleep "$HOLD"
     sudo pkill -f "$(echo "$cmd" | awk '{print $1}')" || true
     sleep 3

@@ -232,25 +232,35 @@ df -h / >&2
 sudo modprobe 9pnet_virtio 2>/dev/null || true
 sudo mkdir -p /mnt/reflex
 sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/reflex
-test -f /mnt/reflex/daemon/main.py
-test -f /mnt/reflex/ebpf/mvp_ringbuf.bpf.c
-sudo rm -f /tmp/mvp.jsonl
+test -f /mnt/reflex/src/reflex/implementations/main.py
+test -f /mnt/reflex/src/ebpf_test/mvp_ringbuf.bpf.c
+BPFTOOL_BIN="$(command -v bpftool || find /usr/lib/linux-tools -type f -name bpftool 2>/dev/null | head -1 || true)"
+if [[ -z "${BPFTOOL_BIN}" ]]; then
+  echo "error: bpftool not found after installing linux-tools packages" >&2
+  exit 1
+fi
+make -C /mnt/reflex/src/reflex/implementations/ebpf BPFTOOL="${BPFTOOL_BIN}"
+sudo rm -rf /tmp/mvp_run
 set +e
-sudo python3 /mnt/reflex/daemon/main.py -o /tmp/mvp.jsonl &
+sudo python3 /mnt/reflex/src/reflex/implementations/main.py \
+  --run-dir /tmp/mvp_run \
+  --no-sudo \
+  heuristic \
+  --loader-binary /mnt/reflex/src/reflex/implementations/ebpf/build/reflex &
 DP=$!
 sleep 3
 for _ in $(seq 1 40); do /bin/true; done
 sudo kill "${DP}" 2>/dev/null
 wait "${DP}" 2>/dev/null
 set -e
-if [[ ! -s /tmp/mvp.jsonl ]]; then
-  echo "error: /tmp/mvp.jsonl missing or empty (eBPF daemon produced no lines)." >&2
+if [[ ! -s /tmp/mvp_run/events.jsonl ]]; then
+  echo "error: /tmp/mvp_run/events.jsonl missing or empty (eBPF daemon produced no lines)." >&2
   exit 1
 fi
 echo "--- sample events ---"
-head -5 /tmp/mvp.jsonl
+head -5 /tmp/mvp_run/events.jsonl
 echo "--- line count ---"
-wc -l /tmp/mvp.jsonl
+wc -l /tmp/mvp_run/events.jsonl
 GUEST
 
 echo "[reflex-vm] OK: MVP daemon wrote JSONL inside the guest."

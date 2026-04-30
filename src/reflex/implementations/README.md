@@ -19,7 +19,7 @@ legacy daemon.
 Build the local loader/eBPF pair:
 
 ```bash
-make -C implementations/ebpf
+make -C src/reflex/implementations/ebpf
 ```
 
 Run a daemon config:

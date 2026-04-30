@@ -58,7 +58,10 @@ class FakeOpenAIClient:
         self.responses = FakeResponses(payload)
 
 
-def _registry() -> TunerRegistry:
+def _registry(tmp_path: Path, *, initial_value: int = 60) -> TunerRegistry:
+    sysctl_dir = tmp_path / "vm"
+    sysctl_dir.mkdir(exist_ok=True)
+    (sysctl_dir / "swappiness").write_text(f"{initial_value}\n", encoding="utf-8")
     entry = TunerCatalogEntry(
         id="sysctl_vm_swappiness",
         category="vm",
@@ -69,7 +72,7 @@ def _registry() -> TunerRegistry:
         max_value=100,
         step=5,
     )
-    return TunerRegistry([GenericSysctlTuner(entry)])
+    return TunerRegistry([GenericSysctlTuner(entry, sysctl_root=tmp_path)])
 
 
 def _summary(mem: float = 0.5, latency: float = 1000.0) -> dict[str, Any]:
@@ -95,12 +98,10 @@ def test_reward_uses_direction_and_normalization() -> None:
     assert reward.per_metric_terms["rq_latency"]["direction"] == "minimize"
 
 
-def test_action_generation_clamps_and_noops_on_unsafe_read(monkeypatch: Any) -> None:
-    registry = _registry()
+def test_action_generation_clamps_and_noops_on_unsafe_read(tmp_path: Path) -> None:
+    registry = _registry(tmp_path, initial_value=98)
     summary = _summary()
-    monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
     tuners = eligible_tuners(registry, summary)
-    monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 98)
 
     candidate = build_step_candidate(tuners[0], "increase", reason="test")
 
@@ -108,11 +109,9 @@ def test_action_generation_clamps_and_noops_on_unsafe_read(monkeypatch: Any) -> 
     assert candidate.action.value == 100
 
 
-def test_openai_validation_schedules_only_when_apply_allowed(monkeypatch: Any) -> None:
+def test_openai_validation_schedules_only_when_apply_allowed(tmp_path: Path) -> None:
     async def scenario() -> None:
-        registry = _registry()
-        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
-        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        registry = _registry(tmp_path)
         payload = {
             "actions": [
                 {
@@ -140,11 +139,9 @@ def test_openai_validation_schedules_only_when_apply_allowed(monkeypatch: Any) -
     asyncio.run(scenario())
 
 
-def test_hillclimb_exposes_pending_action_and_blocks_overlap(monkeypatch: Any) -> None:
+def test_hillclimb_exposes_pending_action_and_blocks_overlap(tmp_path: Path) -> None:
     async def scenario() -> None:
-        registry = _registry()
-        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
-        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        registry = _registry(tmp_path)
         controller = HillClimbController(
             registry,
             interval_windows=1,
@@ -165,11 +162,9 @@ def test_hillclimb_exposes_pending_action_and_blocks_overlap(monkeypatch: Any) -
     asyncio.run(scenario())
 
 
-def test_hillclimb_accepted_evaluation_logs_noop_not_rollback(monkeypatch: Any) -> None:
+def test_hillclimb_accepted_evaluation_logs_noop_not_rollback(tmp_path: Path) -> None:
     async def scenario() -> None:
-        registry = _registry()
-        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
-        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        registry = _registry(tmp_path)
         controller = HillClimbController(
             registry,
             interval_windows=1,
@@ -194,13 +189,10 @@ def test_hillclimb_accepted_evaluation_logs_noop_not_rollback(monkeypatch: Any) 
 
 
 def test_bandit_learns_delta_not_absolute_reward_and_cools_negative_action(
-    monkeypatch: Any,
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        registry = _registry()
-        monkeypatch.setattr("pathlib.Path.is_file", lambda _path: True)
-        monkeypatch.setattr("implementations.controllers.tuning_shared.read_current_value", lambda _t: 60)
+        registry = _registry(tmp_path)
         controller = ContextualBanditController(
             registry,
             alpha=1.0,

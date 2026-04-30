@@ -91,7 +91,7 @@ class PendingAction:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return Path(__file__).resolve().parents[4]
 
 
 def default_reward_path() -> Path:
@@ -233,7 +233,9 @@ def eligible_tuners(registry: TunerRegistry, summary: dict[str, Any]) -> list[El
 
 def read_current_value(tuner: EligibleTuner) -> int | None:
     try:
-        return int(read_sysctl(sysctl_name_to_path(tuner.target), "int"))
+        raw = tuner.tuner
+        path = raw.sysctl_path if hasattr(raw, "sysctl_path") else sysctl_name_to_path(tuner.target)
+        return int(read_sysctl(path, "int"))
     except (OSError, ValueError, TypeError):
         return None
 

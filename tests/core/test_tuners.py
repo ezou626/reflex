@@ -54,8 +54,10 @@ def test_v2_sysctl_read_write_int(tmp_path: Path) -> None:
     assert read_sysctl(fake, "int") == 55
 
 
-def test_v2_tuner_apply_captures_previous_value(monkeypatch: object, tmp_path: Path) -> None:
-    fake = tmp_path / "swappiness"
+def test_v2_tuner_apply_captures_previous_value(tmp_path: Path) -> None:
+    sysctl_dir = tmp_path / "vm"
+    sysctl_dir.mkdir()
+    fake = sysctl_dir / "swappiness"
     fake.write_text("60\n", encoding="utf-8")
     entry = TunerCatalogEntry(
         id="sysctl_vm_swappiness",
@@ -64,8 +66,7 @@ def test_v2_tuner_apply_captures_previous_value(monkeypatch: object, tmp_path: P
         kind="int",
         sysctl="vm.swappiness",
     )
-    tuner = GenericSysctlTuner(entry)
-    monkeypatch.setattr("daemon_core.tuners.sysctl.sysctl_name_to_path", lambda _name: fake)
+    tuner = GenericSysctlTuner(entry, sysctl_root=tmp_path)
 
     applied = tuner.apply(
         TunerAction(

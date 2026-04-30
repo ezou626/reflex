@@ -9,17 +9,23 @@ from reflex.core.tuners.sysctl_util import read_sysctl, sysctl_name_to_path, wri
 
 
 class GenericSysctlTuner(BaseTuner):
-    def __init__(self, entry: TunerCatalogEntry) -> None:
+    def __init__(
+        self,
+        entry: TunerCatalogEntry,
+        *,
+        sysctl_root: Path = Path("/proc/sys"),
+    ) -> None:
         if entry.scope != "runtime_sysctl":
             raise ValueError("GenericSysctlTuner requires runtime_sysctl scope")
         self._entry = entry
         self.tuner_id = entry.id
         self.sysctl_name = entry.sysctl
         self.kind: SysctlKind = entry.kind
+        self._sysctl_root = sysctl_root
 
     @property
     def sysctl_path(self) -> Path:
-        return sysctl_name_to_path(self.sysctl_name)
+        return self._sysctl_root.joinpath(*self.sysctl_name.split("."))
 
     def supports(self, sample: Any) -> bool:
         del sample
