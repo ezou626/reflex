@@ -3,3 +3,5 @@
 - [ ] Reduce performance overhead for daemons
 - [ ] Benchmark all daemons with Unixbench
 - [ ] Benchmark all daemons with sysbench
+- [ ] Find scenarios where existing controllers beat
+- [ ] Fix OpenAI controller
