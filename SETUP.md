@@ -5,13 +5,15 @@
 ```bash
 # bash
 ./scripts/setup_dev_env.sh
+# run unixbench benchmark
 ./benchmarks/unixbench_qemu.sh
 ```
 
 ```powershell
 # windows
 .\scripts\setup_windows.ps1
-powershell -ExecutionPolicy Bypass -File .\benchmarks\unixbench_qemu.ps1
+# run unixbench benchmark
+powershell -ExecutionPolicy Bypass -File .\benchmarks\unixbench_qemu.ps1 -Modes "classifier,heuristic"
 ```
 
 Please ensure you have root access.
