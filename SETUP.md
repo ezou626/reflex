@@ -21,7 +21,7 @@ Hardware virtualization needed
 
 ```powershell
 # windows
-.\scripts\setup_windows.ps1
+.\scripts\setup.ps1
 # run unixbench benchmark
 powershell -ExecutionPolicy Bypass -File .\benchmarks\unixbench_qemu.ps1 -Modes "classifier,heuristic"
 ```

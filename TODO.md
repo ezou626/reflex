@@ -7,3 +7,4 @@
 - [ ] Fix OpenAI controller
 - [ ] Make SETUP.md shorter
 - [ ] Add architecture in README.md
+- [ ] Add build BPFTool from source if bpftool fails in [setup.sh](./scripts/setup.sh)
