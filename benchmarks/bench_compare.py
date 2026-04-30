@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare UnixBench or LEBench scores across controller modes.
+Compare UnixBench, sysbench, or LEBench scores across controller modes.
 
 Usage:
     python3 benchmarks/bench_compare.py baseline:data/runs/RUN_A noop:data/runs/RUN_B classifier:data/runs/RUN_C
@@ -117,6 +117,60 @@ def _print_lebench_table(
     print()
 
 
+def _print_sysbench_table(
+    labels: list[str], scores: list[dict[str, Any]], baseline_label: str
+) -> None:
+    base_idx = labels.index(baseline_label) if baseline_label in labels else 0
+    metrics = [
+        "primary_value",
+        "events_per_sec",
+        "memory_mib_per_sec",
+        "total_events",
+        "total_time_sec",
+    ]
+    latency_keys: list[str] = []
+    for s in scores:
+        for key in s.get("latency_ms", {}):
+            if key not in latency_keys:
+                latency_keys.append(key)
+
+    header = f"{'metric':<24}" + "".join(f"{label[:12]:>14}" for label in labels) + "".join(
+        f"  d%_vs_{labels[base_idx][:6]}" for label in labels if label != labels[base_idx]
+    )
+    print("sysbench Metrics")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+
+    primary_metric = next(
+        (s.get("primary_metric") for s in scores if s.get("primary_metric")),
+        None,
+    )
+    if primary_metric:
+        print(f"primary metric: {primary_metric}")
+
+    for name in metrics:
+        vals = [s.get(name) for s in scores]
+        if not any(v is not None for v in vals):
+            continue
+        row = f"{name:<24}" + "".join(_fmt(v, width=14) for v in vals)
+        for i, _label in enumerate(labels):
+            if i != base_idx:
+                row += _delta_pct(vals[base_idx], vals[i])
+        print(row)
+
+    for key in latency_keys:
+        vals = [s.get("latency_ms", {}).get(key) for s in scores]
+        row = f"{('latency_ms.' + key)[:24]:<24}" + "".join(
+            _fmt(v, width=14) for v in vals
+        )
+        for i, _label in enumerate(labels):
+            if i != base_idx:
+                row += _delta_pct(vals[base_idx], vals[i])
+        print(row)
+    print()
+
+
 def compare(label_dirs: list[tuple[str, Path]], baseline_label: str) -> dict[str, Any]:
     labels = [ld[0] for ld in label_dirs]
     run_dirs = [ld[1] for ld in label_dirs]
@@ -134,11 +188,13 @@ def compare(label_dirs: list[tuple[str, Path]], baseline_label: str) -> dict[str
 
     if detected == "unixbench":
         _print_unixbench_table(labels, scores, baseline_label)
+    elif detected == "sysbench":
+        _print_sysbench_table(labels, scores, baseline_label)
     elif detected == "lebench":
         _print_lebench_table(labels, scores, baseline_label)
     else:
         print("No parseable benchmark output found in workload.log files.")
-        print("Searched for UnixBench 'System Benchmarks Index' and LEBench 'usec/call' lines.")
+        print("Searched for UnixBench, sysbench, and LEBench output markers.")
 
     return {
         "benchmark_type": detected,
@@ -152,7 +208,10 @@ def compare(label_dirs: list[tuple[str, Path]], baseline_label: str) -> dict[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compare UnixBench or LEBench scores across controller mode run dirs."
+        description=(
+            "Compare UnixBench, sysbench, or LEBench scores across controller "
+            "mode run dirs."
+        )
     )
     parser.add_argument(
         "label_dirs",

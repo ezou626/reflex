@@ -204,7 +204,7 @@ $qemuLog = Join-Path $CacheDir "unixbench-qemu-$PID.log"
 $Key = Join-Path $CacheDir "id_ed25519"
 $pub = "$Key.pub"
 $KnownHosts = Join-Path $CacheDir "known_hosts.unixbench.$PID"
-$repoZip = Join-Path $CacheDir "reflex-$PID.zip"
+$repoTar = Join-Path $CacheDir "reflex-$PID.tar.gz"
 $runRootFile = Join-Path $CacheDir "unixbench-run-root-$PID.txt"
 
 if (-not (Test-Path $Key)) {
@@ -316,17 +316,17 @@ try {
     Wait-ForSsh -KeyPath $Key -Port $SshPort
 
     Write-Step "Preparing repo archive"
-    if (Test-Path $repoZip) { Remove-Item -Force $repoZip }
+    if (Test-Path $repoTar) { Remove-Item -Force $repoTar }
     $wslRoot = (wsl wslpath -u ($repoRoot.ToString().Replace('\', '/'))).Trim()
-    $wslZip  = (wsl wslpath -u ($repoZip.Replace('\', '/'))).Trim()
-    wsl bash -c "cd '$wslRoot' && zip -r -q '$wslZip' . --exclude './.git/*' --exclude './.venv/*' --exclude './data/qemu-windows/*' --exclude './data/qemu/*' --exclude './__pycache__/*' --exclude './.worktrees/*'"
-    if ($LASTEXITCODE -ne 0) { throw "repo zip creation failed" }
+    $wslTar  = (wsl wslpath -u ($repoTar.Replace('\', '/'))).Trim()
+    wsl bash -c "cd '$wslRoot' && tar -czf '$wslTar' --exclude='./.git' --exclude='./.venv' --exclude='./data/qemu-windows' --exclude='./data/qemu' --exclude='./__pycache__' --exclude='./.worktrees' ."
+    if ($LASTEXITCODE -ne 0) { throw "repo tar creation failed" }
 
     Write-Step "Copying repo archive to guest"
     & scp -i $Key -P $SshPort `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
-        $repoZip ubuntu@127.0.0.1:/home/ubuntu/reflex.zip
+        $repoTar ubuntu@127.0.0.1:/home/ubuntu/reflex.tar.gz
     if ($LASTEXITCODE -ne 0) {
         throw "scp repo archive failed"
     }
@@ -366,7 +366,7 @@ wait_for_apt
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential clang libbpf-dev bpfcc-tools python3-bpfcc \
-  git make perl curl ca-certificates unzip linux-tools-common >/dev/null
+  git make perl curl ca-certificates linux-tools-common >/dev/null
 if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   "linux-headers-$(uname -r)" "linux-tools-$(uname -r)" >/dev/null; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
@@ -381,7 +381,7 @@ fi
 
 rm -rf /home/ubuntu/reflex
 mkdir -p /home/ubuntu/reflex
-unzip -q -o /home/ubuntu/reflex.zip -d /home/ubuntu/reflex
+tar -xzf /home/ubuntu/reflex.tar.gz -C /home/ubuntu/reflex
 find /home/ubuntu/reflex -name "*.sh" -exec sed -i 's/\r//' {} +
 cd /home/ubuntu/reflex
 uv venv --system-site-packages --allow-existing
@@ -450,7 +450,7 @@ finally {
         Stop-Process -Id $qemuProc.Id -Force
     }
     if (-not $KeepVm) {
-        Remove-Item -Force $overlay, $seedIso, $repoZip, $KnownHosts, $runRootFile -ErrorAction SilentlyContinue
+        Remove-Item -Force $overlay, $seedIso, $repoTar, $KnownHosts, $runRootFile -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $seedDir -ErrorAction SilentlyContinue
     } else {
         Write-Step "Keeping VM artifacts in $CacheDir"

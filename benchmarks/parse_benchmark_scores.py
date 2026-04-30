@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parsers for UnixBench and LEBench workload.log output."""
+"""Parsers for UnixBench, LEBench, and sysbench workload.log output."""
 from __future__ import annotations
 
 import re
@@ -51,6 +51,79 @@ def parse_unixbench(text: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# sysbench
+# ---------------------------------------------------------------------------
+
+def parse_sysbench(text: str) -> dict[str, Any]:
+    """
+    Extract common metrics from sysbench output.
+
+    sysbench reports different throughput labels by test. CPU/thread/mutex/fileio
+    workloads commonly emit "events per second"; memory emits a transferred line
+    with MiB/sec in parentheses. All standard tests include total time and latency
+    percentiles.
+    """
+    result: dict[str, Any] = {
+        "test": None,
+        "events_per_sec": None,
+        "total_events": None,
+        "total_time_sec": None,
+        "latency_ms": {},
+        "memory_mib_per_sec": None,
+        "primary_metric": None,
+        "primary_value": None,
+    }
+
+    generic_test_re = re.compile(
+        r"^Running the test with following options:",
+        re.MULTILINE,
+    )
+    memory_test_re = re.compile(r"^Running memory speed test", re.MULTILINE)
+    events_re = re.compile(r"events per second:\s+([\d.]+)")
+    total_events_re = re.compile(r"total number of events:\s+(\d+)")
+    total_time_re = re.compile(r"total time:\s+([\d.]+)s")
+    memory_re = re.compile(r"\(([\d.]+)\s+MiB/sec\)")
+    latency_re = re.compile(
+        r"^\s*(min|avg|max|95th percentile|sum):\s+([\d.]+)\s*$"
+    )
+    command_re = re.compile(r"^\+\s+\S*sysbench\s+([\w_-]+)\b", re.MULTILINE)
+
+    test_match = command_re.search(text)
+    if test_match:
+        result["test"] = test_match.group(1)
+    elif memory_test_re.search(text):
+        result["test"] = "memory"
+    elif generic_test_re.search(text):
+        result["test"] = "unknown"
+
+    for line in text.splitlines():
+        if m := events_re.search(line):
+            result["events_per_sec"] = float(m.group(1))
+        elif m := total_events_re.search(line):
+            result["total_events"] = int(m.group(1))
+        elif m := total_time_re.search(line):
+            result["total_time_sec"] = float(m.group(1))
+        elif "transferred" in line:
+            if m := memory_re.search(line):
+                result["memory_mib_per_sec"] = float(m.group(1))
+        elif m := latency_re.match(line):
+            name = m.group(1).replace(" ", "_")
+            result["latency_ms"][name] = float(m.group(2))
+
+    if result["memory_mib_per_sec"] is not None:
+        result["primary_metric"] = "memory_mib_per_sec"
+        result["primary_value"] = result["memory_mib_per_sec"]
+    elif result["events_per_sec"] is not None:
+        result["primary_metric"] = "events_per_sec"
+        result["primary_value"] = result["events_per_sec"]
+    elif result["total_events"] is not None and result["total_time_sec"]:
+        result["primary_metric"] = "events_per_sec"
+        result["primary_value"] = result["total_events"] / result["total_time_sec"]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # LEBench
 # ---------------------------------------------------------------------------
 
@@ -78,10 +151,12 @@ def parse_lebench(text: str) -> dict[str, float]:
 def detect_and_parse(text: str) -> tuple[str, dict[str, Any]]:
     """
     Returns (benchmark_type, parsed_scores) where benchmark_type is
-    'unixbench', 'lebench', or 'unknown'.
+    'unixbench', 'sysbench', 'lebench', or 'unknown'.
     """
     if "System Benchmarks Index" in text or "Dhrystone" in text:
         return "unixbench", parse_unixbench(text)
+    if "sysbench " in text and "General statistics:" in text:
+        return "sysbench", parse_sysbench(text)
     if re.search(r"^\w[\w+/]*:\s+[\d.]+\s+usec/call", text, re.MULTILINE):
         return "lebench", {"latencies": parse_lebench(text)}
     return "unknown", {}
