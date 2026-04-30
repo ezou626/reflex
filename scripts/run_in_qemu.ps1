@@ -322,13 +322,13 @@ $qemuProc.ProcessorAffinity = [IntPtr]0xFF  # P-cores; adjust mask as needed
 try {
 	New-Item -ItemType File -Force -Path $KnownHosts | Out-Null
 	Write-Step "Waiting for SSH"
-	Wait-ForSsh -KeyPath $Key -Port $SshPort
+	Wait-ForSsh -KeyPath $Key -SshPort $Port
 
 	Write-Step "Preparing repo archive"
 	New-RepoArchive -SourceRoot $repoRoot -ZipPath $repoZip
 
 	Write-Step "Copying repo archive to guest"
-	& scp -i $Key -P $SshPort `
+	& scp -i $Key -P $Port `
 		-o StrictHostKeyChecking=yes `
 		-o UserKnownHostsFile="$KnownHosts" `
 		$repoZip ubuntu@127.0.0.1:/home/ubuntu/reflex.zip
@@ -401,7 +401,7 @@ if [[ -z "$BPFTOOL_BIN" ]]; then
 	exit 1
 fi
 "$BPFTOOL_BIN" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
-make -C src/reflex/implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
+make -C implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 
 # Start the configured daemon (implementations.main) as a background service.
 # Use sudo + env to ensure it has required privileges and receives OPENAI key.
@@ -413,13 +413,13 @@ printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DAEMON_PIDFILE" > /home/ubuntu/
 '@
 	$suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
 	$dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
-	$guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg).Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
+	$guestScript = $guestScript.Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
 	$guestScript = $guestScript -replace "`r", ""
 	$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
 	Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_daemon.sh && bash /home/ubuntu/run_reflex_daemon.sh"
 
 	Write-Step "Copying daemon start marker back to Windows host"
-	& scp -r -i $Key -P $SshPort `
+	& scp -r -i $Key -P $Port `
 		-o StrictHostKeyChecking=yes `
 		-o UserKnownHostsFile="$KnownHosts" `
 		ubuntu@127.0.0.1:/home/ubuntu/reflex/daemon_started.txt `
