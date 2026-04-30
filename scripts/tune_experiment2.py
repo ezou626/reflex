@@ -27,8 +27,8 @@ from skopt.space import Integer
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from daemon_core.tuners.loaders import load_tuner_catalog  # noqa: E402
-from daemon_core.tuners.sysctl_util import (  # noqa: E402
+from reflex.core.tuners.loaders import load_tuner_catalog  # noqa: E402
+from reflex.core.tuners.sysctl_util import (  # noqa: E402
     read_sysctl,
     sysctl_name_to_path,
     write_sysctl,

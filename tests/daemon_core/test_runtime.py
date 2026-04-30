@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from daemon_core import AggregatorSample, Daemon, ExecutionResult, QueueSizes, Runtime
+from reflex.core import AggregatorSample, Daemon, ExecutionResult, QueueSizes, Runtime
 
 
 class IdleAggregator:

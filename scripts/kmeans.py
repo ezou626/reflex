@@ -45,7 +45,7 @@ NORMS: dict[str, float] = {
 }
 
 sys.path.insert(0, str(REPO))
-from daemon_core.tuners.loaders import load_tuner_catalog  # noqa: E402
+from reflex.core.tuners.loaders import load_tuner_catalog  # noqa: E402
 
 
 def _cluster_gp_best(members: list[dict], space: list) -> dict:
