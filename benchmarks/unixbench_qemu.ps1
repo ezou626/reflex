@@ -396,7 +396,7 @@ if [[ -z "$BPFTOOL_BIN" ]]; then
   exit 1
 fi
 "$BPFTOOL_BIN" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
-make -C implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
+make -C src/reflex/implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 
 UNIXBENCH_DIR="$HOME/byte-unixbench"
 if [[ ! -x "$UNIXBENCH_DIR/UnixBench/Run" ]]; then
@@ -416,14 +416,6 @@ printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
     Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_unixbench.sh && bash /home/ubuntu/run_reflex_unixbench.sh"
 
     Write-Step "Copying results back to Windows host"
-    & scp -r -i $Key -P $SshPort `
-        -o StrictHostKeyChecking=yes `
-        -o UserKnownHostsFile="$KnownHosts" `
-        ubuntu@127.0.0.1:/home/ubuntu/reflex/data/unixbench_results.csv `
-        (Join-Path $repoRoot "data\unixbench_results.csv")
-    if ($LASTEXITCODE -ne 0) {
-        throw "scp unixbench_results.csv failed"
-    }
     & scp -r -i $Key -P $SshPort `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
@@ -450,7 +442,6 @@ printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
 
     Write-Step "Done"
     Write-Host "Results:"
-    Write-Host "  data\unixbench_results.csv"
     Write-Host "  data\runs\$runName\"
 }
 finally {

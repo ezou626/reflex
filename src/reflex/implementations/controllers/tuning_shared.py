@@ -200,7 +200,7 @@ def smoothed_reward(
     return RewardResult(total_reward=total, per_metric_terms=terms)
 
 
-def eligible_tuners(registry: TunerRegistry, summary: dict[str, Any]) -> list[EligibleTuner]:
+def eligible_tuners(registry: TunerRegistry) -> list[EligibleTuner]:
     out: list[EligibleTuner] = []
     for tuner in registry.enabled_tuners():
         entry = getattr(tuner, "_entry", None)
@@ -213,7 +213,7 @@ def eligible_tuners(registry: TunerRegistry, summary: dict[str, Any]) -> list[El
         if int(entry.step) <= 0:
             continue
         try:
-            if not tuner.supports(summary):
+            if not tuner.supports():
                 continue
         except OSError:
             continue
@@ -262,30 +262,21 @@ def build_step_candidate(
     *,
     steps: int = 1,
     reason: str,
-    priority: int = 50,
 ) -> ActionCandidate:
-    current = read_current_value(tuner)
-    if current is None:
-        return noop_candidate("unsafe read", {"tuner_id": tuner.tuner_id})
-    delta = tuner.step * max(1, steps)
-    raw = current + delta if direction == "increase" else current - delta
-    candidate = clamp_to_step(raw, tuner)
-    if candidate == current:
-        return noop_candidate("boundary reached", {"tuner_id": tuner.tuner_id, "current": current})
-    action = TunerAction(
-        tuner_id=tuner.tuner_id,
-        action_id=f"{direction}_{tuner.tuner_id}",
-        target=tuner.target,
-        value=candidate,
+    action = tuner.tuner.create_step_action(
+        direction,
+        steps=steps,
         reason=reason,
-        priority=priority,
-        metadata={"current": current, "direction": direction, "steps": steps},
     )
+    if action is None:
+        return noop_candidate("unsafe read", {"tuner_id": tuner.tuner_id})
+    current = action.metadata.get("current")
+    candidate = action.value
     return ActionCandidate(
         action=action,
         direction=direction,
-        current_value=current,
-        candidate_value=candidate,
+        current_value=int(current) if current is not None else None,
+        candidate_value=int(candidate) if candidate is not None else None,
         reason=reason,
     )
 
@@ -296,15 +287,11 @@ def build_set_action(
     *,
     action_id: str,
     reason: str,
-    priority: int = 80,
-) -> TunerAction:
-    return TunerAction(
-        tuner_id=tuner.tuner_id,
+) -> TunerAction | None:
+    return tuner.tuner.create_set_action(
+        value,
         action_id=action_id,
-        target=tuner.target,
-        value=clamp_to_step(value, tuner),
         reason=reason,
-        priority=priority,
     )
 
 

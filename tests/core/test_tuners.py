@@ -80,3 +80,33 @@ def test_v2_tuner_apply_captures_previous_value(tmp_path: Path) -> None:
 
     assert applied.previous_value == 60
     assert read_sysctl(fake, "int") == 30
+
+
+def test_v2_tuner_creates_actions_and_rejects_invalid_values(tmp_path: Path) -> None:
+    sysctl_dir = tmp_path / "vm"
+    sysctl_dir.mkdir()
+    fake = sysctl_dir / "swappiness"
+    fake.write_text("60\n", encoding="utf-8")
+    entry = TunerCatalogEntry(
+        id="sysctl_vm_swappiness",
+        category="vm",
+        description="test",
+        kind="int",
+        sysctl="vm.swappiness",
+        min_value=0,
+        max_value=100,
+        step=5,
+    )
+    tuner = GenericSysctlTuner(entry, sysctl_root=tmp_path)
+
+    valid_step = tuner.create_step_action("decrease", reason="test")
+    invalid_step = tuner.create_step_action("increase", steps=9, reason="test")
+    valid_set = tuner.create_set_action(55, action_id="set", reason="test")
+    invalid_set = tuner.create_set_action(101, action_id="set", reason="test")
+
+    assert valid_step is not None
+    assert valid_step.value == 55
+    assert invalid_step is None
+    assert valid_set is not None
+    assert valid_set.value == 55
+    assert invalid_set is None

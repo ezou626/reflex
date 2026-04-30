@@ -5,7 +5,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-
 @dataclass
 class TunerAction:
     tuner_id: str
@@ -13,7 +12,6 @@ class TunerAction:
     target: str
     value: Any
     reason: str
-    priority: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -29,8 +27,28 @@ class BaseTuner(abc.ABC):
     tuner_id: str
 
     @abc.abstractmethod
-    def supports(self, sample: Any) -> bool:
+    def supports(self) -> bool:
         raise NotImplementedError
+
+    def create_step_action(
+        self,
+        direction: str,
+        *,
+        steps: int = 1,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TunerAction | None:
+        return None
+
+    def create_set_action(
+        self,
+        value: Any,
+        *,
+        action_id: str,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> TunerAction | None:
+        return None
 
     @abc.abstractmethod
     def apply(self, action: TunerAction, dry_run: bool = False) -> AppliedAction:

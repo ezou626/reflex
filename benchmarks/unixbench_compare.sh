@@ -48,7 +48,6 @@ else
 fi
 
 BENCH_CMD="cd ${UNIXBENCH_DIR} && ${UNIXBENCH_BIN} ${BENCH_ARGS[*]}"
-OUT="${OUT:-${REPO}/data/unixbench_results.csv}"
 RUN_ROOT="${RUN_ROOT:-${REPO}/data/runs/unixbench-$(date +%Y%m%d-%H%M%S)}"
 IFS=',' read -r -a MODES <<< "${MODES_CSV}"
 
@@ -121,7 +120,7 @@ run_bench() {
         # 2. Start daemon_core implementation.
         sudo env "PATH=${PATH}" "UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/uv-cache}" \
             "${openai_env[@]}" \
-            "${UV_BIN}" run python -m implementations.main \
+            "${UV_BIN}" run python -m reflex.implementations.main \
             --no-sudo \
             --run-id "unixbench-$mode" \
             --run-dir "$run_dir" \
@@ -158,17 +157,14 @@ run_bench() {
     echo "$score"
 }
 
-echo "mode,score" > "$OUT"
 echo "mode,score" > "$RUN_ROOT/unixbench_results.csv"
 
 for mode in "${MODES[@]}"; do
     score=$(run_bench "$mode")
-    echo "$mode,$score" >> "$OUT"
     echo "$mode,$score" >> "$RUN_ROOT/unixbench_results.csv"
 done
 
 echo ""
-echo "Results written to $OUT"
 echo "Run artifacts written to $RUN_ROOT"
 echo ""
-cat "$OUT"
+cat "$RUN_ROOT/unixbench_results.csv"

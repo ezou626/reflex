@@ -12,7 +12,7 @@ KVM/HVF is needed for practical QEMU performance.
 # bash
 ./scripts/setup.sh
 # start the QEMU VM and run the configured mode
-bash ./scripts/run_in_qemu.sh --modes heuristic
+bash ./scripts/run_in_qemu.sh --daemon heuristic
 ```
 
 ### Windows
@@ -23,7 +23,7 @@ Hardware virtualization needed
 # windows
 .\scripts\setup.ps1
 # start the QEMU VM and run the configured mode
-powershell -ExecutionPolicy Bypass -File .\scripts\run_in_qemu.ps1 -Modes "heuristic"
+powershell -ExecutionPolicy Bypass -File .\scripts\run_in_qemu.ps1 -Daemon "heuristic"
 ```
 
 ### Description

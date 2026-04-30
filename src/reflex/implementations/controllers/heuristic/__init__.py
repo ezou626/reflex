@@ -39,8 +39,16 @@ class HeuristicController:
 
     def _decision_snapshot(self, summary: dict[str, Any]) -> dict[str, Any]:
         host = summary.get("host_features", {})
+        metrics = summary.get("metrics", {})
         return {
-            "summary": summary,
+            "metrics": {
+                "process_churn_rate_per_sec": metrics.get("process_churn_rate_per_sec"),
+                "context_switch_rate_per_sec": metrics.get("context_switch_rate_per_sec"),
+                "syscall_error_rate_per_sec": metrics.get("syscall_error_rate_per_sec"),
+                "rq_latency_p95_us": metrics.get("rq_latency_p95_us"),
+                "direct_reclaim_rate_per_sec": metrics.get("direct_reclaim_rate_per_sec"),
+                "blk_latency_p95_us": metrics.get("blk_latency_p95_us"),
+            },
             "host_features": {
                 "host_mem_available_ratio": host.get("host_mem_available_ratio"),
                 "host_swap_free_ratio": host.get("host_swap_free_ratio"),
@@ -75,84 +83,57 @@ class HeuristicController:
 
         if self.registry.is_enabled("sysctl_vm_swappiness"):
             tuner = self.registry.get("sysctl_vm_swappiness")
-            if tuner is not None and tuner.supports(summary):
-                entry = tuner._entry
-                current = self._read_int("vm.swappiness")
-                if current is not None and entry.min_value is not None and entry.max_value is not None:
-                    if mem_avail <= self.low_mem_ratio and swap_free > 0.2 and current < entry.max_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_swappiness",
-                            action_id="increase_swappiness",
-                            target="vm.swappiness",
-                            value=min(int(entry.max_value), current + int(entry.step)),
-                            reason="Low memory; bias reclaim toward swap.",
-                            priority=50,
-                            metadata={"current": current, "mem_available_ratio": mem_avail},
-                        ))
-                    elif mem_avail >= self.high_mem_ratio and current > entry.min_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_swappiness",
-                            action_id="decrease_swappiness",
-                            target="vm.swappiness",
-                            value=max(int(entry.min_value), current - int(entry.step)),
-                            reason="Healthy free memory; reduce swap aggressiveness.",
-                            priority=40,
-                            metadata={"current": current, "mem_available_ratio": mem_avail},
-                        ))
+            if tuner is not None and tuner.supports():
+                if mem_avail <= self.low_mem_ratio and swap_free > 0.2:
+                    action = tuner.create_step_action(
+                        "increase",
+                        reason="Low memory; bias reclaim toward swap.",
+                    )
+                    if action is not None:
+                        actions.append(action)
+                elif mem_avail >= self.high_mem_ratio:
+                    action = tuner.create_step_action(
+                        "decrease",
+                        reason="Healthy free memory; reduce swap aggressiveness.",
+                    )
+                    if action is not None:
+                        actions.append(action)
 
         if self.registry.is_enabled("sysctl_vm_dirty_ratio"):
             tuner = self.registry.get("sysctl_vm_dirty_ratio")
-            if tuner is not None and tuner.supports(summary):
-                entry = tuner._entry
-                current = self._read_int("vm.dirty_ratio")
-                if current is not None and entry.min_value is not None and entry.max_value is not None:
-                    if dirty_kb > self.high_dirty_kb and current > entry.min_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_dirty_ratio",
-                            action_id="decrease_dirty_ratio",
-                            target="vm.dirty_ratio",
-                            value=max(int(entry.min_value), current - int(entry.step)),
-                            reason="High dirty memory; trigger writeback sooner.",
-                            priority=45,
-                            metadata={"current": current, "dirty_kb": dirty_kb},
-                        ))
-                    elif dirty_kb < self.low_dirty_kb and current < entry.max_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_dirty_ratio",
-                            action_id="increase_dirty_ratio",
-                            target="vm.dirty_ratio",
-                            value=min(int(entry.max_value), current + int(entry.step)),
-                            reason="Low dirty memory; allow more buffering before writeback.",
-                            priority=35,
-                            metadata={"current": current, "dirty_kb": dirty_kb},
-                        ))
+            if tuner is not None and tuner.supports():
+                if dirty_kb > self.high_dirty_kb:
+                    action = tuner.create_step_action(
+                        "decrease",
+                        reason="High dirty memory; trigger writeback sooner.",
+                    )
+                    if action is not None:
+                        actions.append(action)
+                elif dirty_kb < self.low_dirty_kb:
+                    action = tuner.create_step_action(
+                        "increase",
+                        reason="Low dirty memory; allow more buffering before writeback.",
+                    )
+                    if action is not None:
+                        actions.append(action)
 
         if self.registry.is_enabled("sysctl_vm_vfs_cache_pressure"):
             tuner = self.registry.get("sysctl_vm_vfs_cache_pressure")
-            if tuner is not None and tuner.supports(summary):
-                entry = tuner._entry
-                current = self._read_int("vm.vfs_cache_pressure")
-                if current is not None and entry.min_value is not None and entry.max_value is not None:
-                    if mem_avail < 0.20 and current < entry.max_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_vfs_cache_pressure",
-                            action_id="increase_cache_pressure",
-                            target="vm.vfs_cache_pressure",
-                            value=min(int(entry.max_value), current + int(entry.step)),
-                            reason="Low memory; reclaim inode/dentry cache more aggressively.",
-                            priority=48,
-                            metadata={"current": current, "mem_available_ratio": mem_avail},
-                        ))
-                    elif mem_avail > 0.50 and current > entry.min_value:
-                        actions.append(TunerAction(
-                            tuner_id="sysctl_vm_vfs_cache_pressure",
-                            action_id="decrease_cache_pressure",
-                            target="vm.vfs_cache_pressure",
-                            value=max(int(entry.min_value), current - int(entry.step)),
-                            reason="Healthy memory; keep inode/dentry cache warmer.",
-                            priority=38,
-                            metadata={"current": current, "mem_available_ratio": mem_avail},
-                        ))
+            if tuner is not None and tuner.supports():
+                if mem_avail < 0.20:
+                    action = tuner.create_step_action(
+                        "increase",
+                        reason="Low memory; reclaim inode/dentry cache more aggressively.",
+                    )
+                    if action is not None:
+                        actions.append(action)
+                elif mem_avail > 0.50:
+                    action = tuner.create_step_action(
+                        "decrease",
+                        reason="Healthy memory; keep inode/dentry cache warmer.",
+                    )
+                    if action is not None:
+                        actions.append(action)
         return actions
 
     async def run(self, ctx: ControllerRunContext) -> None:
@@ -172,17 +153,14 @@ class HeuristicController:
             {
                 "actions": len(actions),
                 "trigger_reason": ctx.trigger.reason,
-                "decision_inputs": snapshot,
             },
         )
-        sorted_actions = sorted(actions, key=lambda a: a.priority, reverse=True)
-        if sorted_actions:
+        if actions:
             await ctx.enqueue_executor(
-                BatchTunerExecutor(self.registry, sorted_actions),
+                BatchTunerExecutor(self.registry, actions),
                 {
                     "controller": "heuristic",
-                    "action_count": len(sorted_actions),
-                    "priority": sorted_actions[0].priority,
-                    "tuner_ids": [action.tuner_id for action in sorted_actions],
+                    "action_count": len(actions),
+                    "tuner_ids": [action.tuner_id for action in actions],
                 },
             )

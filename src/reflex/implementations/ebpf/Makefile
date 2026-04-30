@@ -2,7 +2,7 @@ CLANG ?= clang
 BPFTOOL ?= bpftool
 
 BUILD_DIR := build
-SRC_ROOT := ../..
+SRC_ROOT := ../../../..
 LOADER := $(BUILD_DIR)/reflex
 COLLECTOR := $(BUILD_DIR)/reflex.bpf.o
 SKEL_H := $(BUILD_DIR)/reflex.skel.h

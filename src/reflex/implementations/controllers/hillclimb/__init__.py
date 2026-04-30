@@ -103,7 +103,7 @@ class HillClimbController:
     def _choose_candidate(self) -> ActionCandidate:
         if self._latest_sample_id() < self._cooldown_until_sample_id:
             return noop_candidate("cooldown")
-        tuners = eligible_tuners(self.registry, self._current_summary())
+        tuners = eligible_tuners(self.registry)
         candidates: list[ActionCandidate] = [noop_candidate("no improvement expected")]
         for tuner in tuners:
             candidates.append(
@@ -111,7 +111,6 @@ class HillClimbController:
                     tuner,
                     "increase",
                     reason="hillclimb candidate increase",
-                    priority=60,
                 )
             )
             candidates.append(
@@ -119,7 +118,6 @@ class HillClimbController:
                     tuner,
                     "decrease",
                     reason="hillclimb candidate decrease",
-                    priority=60,
                 )
             )
         actionable = [c for c in candidates if c.action is not None]
@@ -194,7 +192,7 @@ class HillClimbController:
         latest_id = self._latest_sample_id()
         due_id = latest_id + self.evaluate_after_windows
         rollback = None
-        tuners = {t.tuner_id: t for t in eligible_tuners(self.registry, self._current_summary())}
+        tuners = {t.tuner_id: t for t in eligible_tuners(self.registry)}
         tuner = tuners.get(candidate.action.tuner_id)
         if tuner is not None and candidate.current_value is not None:
             rollback = build_set_action(

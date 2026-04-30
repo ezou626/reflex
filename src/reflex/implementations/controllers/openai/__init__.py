@@ -97,7 +97,7 @@ class OpenAITuningController:
         return self.history[-1][1]
 
     def _catalog_payload(self) -> list[dict[str, Any]]:
-        tuners = eligible_tuners(self.registry, self._current_summary())
+        tuners = eligible_tuners(self.registry)
         values = current_values(tuners)
         return [
             {
@@ -237,7 +237,7 @@ class OpenAITuningController:
         actions = raw.get("actions", [])
         if not isinstance(actions, list):
             return []
-        tuners = {t.tuner_id: t for t in eligible_tuners(self.registry, self._current_summary())}
+        tuners = {t.tuner_id: t for t in eligible_tuners(self.registry)}
         out: list[ActionCandidate] = []
         for item in actions:
             if not isinstance(item, dict):
@@ -260,7 +260,6 @@ class OpenAITuningController:
                 direction,  # type: ignore[arg-type]
                 steps=steps,
                 reason=str(item.get("reason", "OpenAI proposal")),
-                priority=int(float(item.get("confidence", 0.0)) * 100),
             )
             if candidate.action is not None:
                 out.append(candidate)

@@ -113,9 +113,9 @@ class ContextualBanditController:
 
     def _action_space(self) -> dict[str, ActionCandidate]:
         out: dict[str, ActionCandidate] = {"noop": noop_candidate("no improvement expected")}
-        for tuner in eligible_tuners(self.registry, self._current_summary()):
-            inc = build_step_candidate(tuner, "increase", reason="bandit one-step increase", priority=55)
-            dec = build_step_candidate(tuner, "decrease", reason="bandit one-step decrease", priority=55)
+        for tuner in eligible_tuners(self.registry):
+            inc = build_step_candidate(tuner, "increase", reason="bandit one-step increase")
+            dec = build_step_candidate(tuner, "decrease", reason="bandit one-step decrease")
             if inc.action is not None:
                 out[f"{inc.action.tuner_id}:increase:{_current_bin(inc.current_value, tuner.min_value, tuner.step)}"] = inc
             if dec.action is not None:

@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Run the UnixBench comparison inside an Ubuntu guest booted by QEMU.
+# Start a Reflex daemon inside an Ubuntu guest booted by QEMU.
 #
 # This is the Linux/macOS analogue of scripts/run_in_qemu.ps1. It creates a
-# NoCloud seed ISO, boots QEMU, copies this repo into the guest over SSH, runs
-# benchmarks/unixbench_compare.sh, and copies the CSV plus run artifacts back.
+# NoCloud seed ISO, boots QEMU, copies this repo into the guest over SSH, builds
+# the eBPF loader, and starts the selected daemon.
 #
 # Usage:
-#   bash scripts/run_in_qemu.sh --modes workload_only,heuristic,classifier
-#   bash scripts/run_in_qemu.sh --modes workload_only,heuristic --full
+#   bash scripts/run_in_qemu.sh --daemon heuristic
 #
 # Useful env:
 #   REFLEX_VM_CACHE       cache directory (default: ./data/qemu)
-#   REFLEX_VM_SSH_PORT    host TCP port forwarded to guest :22 (default: 52222)
+#   REFLEX_VM_PORT        host TCP port forwarded to guest :22 (default: 52222)
 #   REFLEX_VM_DISK_GB     guest root disk size in GiB (default: 24)
 #   REFLEX_VM_MEMORY_MB   guest memory MiB (default: 4096)
 #   REFLEX_VM_CPUS        guest vCPUs (default: 6)
@@ -23,71 +22,62 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-MODES=""
-SSH_PORT="${REFLEX_VM_SSH_PORT:-52222}"
+DAEMON=""
+PORT="${REFLEX_VM_PORT:-52222}"
 DISK_GB="${REFLEX_VM_DISK_GB:-24}"
 MEMORY_MB="${REFLEX_VM_MEMORY_MB:-4096}"
 CPUS="${REFLEX_VM_CPUS:-6}"
 CACHE_DIR="${REFLEX_VM_CACHE:-${REPO_ROOT}/data/qemu}"
 OPENAI_API_KEY_VALUE="${OPENAI_API_KEY:-}"
 UBUNTU_IMAGE_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-UNIXBENCH_URL="${UNIXBENCH_URL:-https://github.com/kdlucas/byte-unixbench.git}"
-KEEP_VM=0
 FULL=0
 DRY_RUN=0
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/run_in_qemu.sh --modes workload_only,heuristic,classifier [options]
+Usage: bash scripts/run_in_qemu.sh --daemon heuristic [options]
 
 Options:
-  --modes CSV             Required comma-separated modes.
-  --ssh-port PORT         Host SSH forward port. Default: 52222.
+  --daemon NAME           Required daemon name, e.g. heuristic.
+  --port PORT             Host SSH forward port. Default: 52222.
   --disk-gb GB            Guest disk size. Default: 24.
   --memory-mb MB          Guest memory. Default: 4096.
   --cpus N                Guest vCPUs. Default: 6.
-  --cache-dir DIR         Cache/artifact directory. Default: data/qemu.
-  --openai-api-key KEY    Pass an OpenAI API key to guest runs.
-  --ubuntu-image-url URL  Ubuntu cloud image URL.
-  --unixbench-url URL     UnixBench git URL.
-  --keep-vm               Keep QEMU running and retain transient artifacts.
-  --full                  Run full UnixBench suite.
-  --dry-run               Also run *_dry daemon modes.
+  --full                  Accepted for parity with the PowerShell wrapper.
+  --dry-run               Start the daemon in dry-run mode.
   -h, --help              Show this help.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --modes) MODES="$2"; shift ;;
-    --modes=*) MODES="${1#--modes=}" ;;
-    --ssh-port) SSH_PORT="$2"; shift ;;
-    --ssh-port=*) SSH_PORT="${1#--ssh-port=}" ;;
+    --daemon|-Daemon) DAEMON="$2"; shift ;;
+    --daemon=*|-Daemon=*) DAEMON="${1#*=}" ;;
+    --port|-Port) PORT="$2"; shift ;;
+    --port=*|-Port=*) PORT="${1#*=}" ;;
     --disk-gb) DISK_GB="$2"; shift ;;
     --disk-gb=*) DISK_GB="${1#--disk-gb=}" ;;
+    -DiskGB) DISK_GB="$2"; shift ;;
     --memory-mb) MEMORY_MB="$2"; shift ;;
     --memory-mb=*) MEMORY_MB="${1#--memory-mb=}" ;;
+    -MemoryMB) MEMORY_MB="$2"; shift ;;
     --cpus) CPUS="$2"; shift ;;
     --cpus=*) CPUS="${1#--cpus=}" ;;
-    --cache-dir) CACHE_DIR="$2"; shift ;;
-    --cache-dir=*) CACHE_DIR="${1#--cache-dir=}" ;;
-    --openai-api-key) OPENAI_API_KEY_VALUE="$2"; shift ;;
-    --openai-api-key=*) OPENAI_API_KEY_VALUE="${1#--openai-api-key=}" ;;
-    --ubuntu-image-url) UBUNTU_IMAGE_URL="$2"; shift ;;
-    --ubuntu-image-url=*) UBUNTU_IMAGE_URL="${1#--ubuntu-image-url=}" ;;
-    --unixbench-url) UNIXBENCH_URL="$2"; shift ;;
-    --unixbench-url=*) UNIXBENCH_URL="${1#--unixbench-url=}" ;;
-    --keep-vm) KEEP_VM=1 ;;
-    --full) FULL=1 ;;
-    --dry-run) DRY_RUN=1 ;;
+    -Cpus) CPUS="$2"; shift ;;
+    --full|-Full) FULL=1 ;;
+    --dry-run|-DryRun) DRY_RUN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
   shift
 done
 
-if [[ -z "${MODES}" ]]; then
-  echo "error: --modes is required, e.g. --modes workload_only,heuristic,classifier" >&2
+if [[ -z "${DAEMON}" ]]; then
+  echo "error: --daemon is required, e.g. --daemon heuristic" >&2
+  exit 1
+fi
+if [[ ! "${DAEMON}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+  echo "error: daemon name must contain only letters, numbers, '.', '_', or '-'" >&2
   exit 1
 fi
 
@@ -209,7 +199,7 @@ wait_for_ssh() {
 }
 
 ssh_guest() {
-  ssh -i "$KEY" -p "$SSH_PORT" \
+  ssh -i "$KEY" -p "$PORT" \
     -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$KNOWN_HOSTS" \
     -o ConnectTimeout=30 \
@@ -217,17 +207,13 @@ ssh_guest() {
 }
 
 cleanup() {
-  if [[ "$KEEP_VM" != "1" && -n "${QEMU_PID:-}" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
+  if [[ -n "${QEMU_PID:-}" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
     step "Stopping QEMU"
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true
   fi
-  if [[ "$KEEP_VM" != "1" ]]; then
-    rm -f "$OVERLAY" "$SEED_ISO" "$REPO_ZIP" "$KNOWN_HOSTS" "$RUN_ROOT_FILE" "${GUEST_SCRIPT:-}" 2>/dev/null || true
-    rm -rf "$SEED_DIR" 2>/dev/null || true
-  elif [[ -n "${CACHE_DIR:-}" ]]; then
-    step "Keeping VM artifacts in ${CACHE_DIR}"
-  fi
+  rm -f "$OVERLAY" "$SEED_ISO" "$REPO_ZIP" "$KNOWN_HOSTS" "$RUN_ROOT_FILE" "${GUEST_SCRIPT:-}" 2>/dev/null || true
+  rm -rf "$SEED_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -248,17 +234,17 @@ fi
 mkdir -p "$CACHE_DIR" "$REPO_ROOT/data"
 
 BASE_IMG="${CACHE_DIR}/noble-server-cloudimg-amd64.img"
-OVERLAY="${CACHE_DIR}/unixbench-overlay-$$.qcow2"
-SEED_ISO="${CACHE_DIR}/unixbench-seed-$$.iso"
+OVERLAY="${CACHE_DIR}/reflex-overlay-$$.qcow2"
+SEED_ISO="${CACHE_DIR}/reflex-seed-$$.iso"
 SEED_DIR="${CACHE_DIR}/seed-$$"
-CONSOLE_LOG="${CACHE_DIR}/unixbench-console-$$.log"
-QEMU_LOG="${CACHE_DIR}/unixbench-qemu-$$.log"
+CONSOLE_LOG="${CACHE_DIR}/reflex-console-$$.log"
+QEMU_LOG="${CACHE_DIR}/reflex-qemu-$$.log"
 KEY="${CACHE_DIR}/id_ed25519"
 PUB="${KEY}.pub"
-KNOWN_HOSTS="${CACHE_DIR}/known_hosts.unixbench.$$"
+KNOWN_HOSTS="${CACHE_DIR}/known_hosts.reflex.$$"
 REPO_ZIP="${CACHE_DIR}/reflex-$$.zip"
-RUN_ROOT_FILE="${CACHE_DIR}/unixbench-run-root-$$.txt"
-GUEST_SCRIPT="${CACHE_DIR}/run-reflex-unixbench-$$.sh"
+RUN_ROOT_FILE="${CACHE_DIR}/daemon-started-$$.txt"
+GUEST_SCRIPT="${CACHE_DIR}/run-reflex-daemon-$$.sh"
 QEMU_PID=""
 
 if [[ ! -f "$KEY" ]]; then
@@ -285,8 +271,8 @@ rm -rf "$SEED_DIR"
 mkdir -p "$SEED_DIR"
 PUB_LINE="$(tr -d '\r\n' < "$PUB")"
 cat >"$SEED_DIR/meta-data" <<EOF
-instance-id: iid-reflex-unixbench-$$
-local-hostname: reflex-unixbench
+instance-id: iid-reflex-$$
+local-hostname: reflex-qemu
 EOF
 cat >"$SEED_DIR/user-data" <<EOF
 #cloud-config
@@ -310,7 +296,7 @@ elif [[ "$ACCEL" == "tcg" ]]; then
   step "Using QEMU TCG emulation; this will be much slower than KVM/HVF."
 fi
 
-step "Starting QEMU on 127.0.0.1:${SSH_PORT} with accel=${ACCEL}"
+step "Starting QEMU on 127.0.0.1:${PORT} with accel=${ACCEL}"
 qemu-system-x86_64 \
   -machine "type=q35,accel=${ACCEL}" \
   -smbios "type=1,serial=ds=nocloud" \
@@ -321,7 +307,7 @@ qemu-system-x86_64 \
   -serial "file:${CONSOLE_LOG}" \
   -drive "file=${OVERLAY},if=virtio,cache=writeback" \
   -cdrom "$SEED_ISO" \
-  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${PORT}-:22" \
   -device e1000,netdev=net0 \
   >"$QEMU_LOG" 2>&1 &
 QEMU_PID="$!"
@@ -330,7 +316,7 @@ touch "$KNOWN_HOSTS"
 chmod 600 "$KNOWN_HOSTS" 2>/dev/null || true
 
 step "Waiting for SSH"
-if ! wait_for_ssh "$KEY" "$SSH_PORT" "$KNOWN_HOSTS"; then
+if ! wait_for_ssh "$KEY" "$PORT" "$KNOWN_HOSTS"; then
   echo "error: SSH did not become ready. Last console lines:" >&2
   tail -50 "$CONSOLE_LOG" >&2 || true
   echo "Last QEMU log lines:" >&2
@@ -354,7 +340,7 @@ zip -r -q "$REPO_ZIP" . \
   --exclude './.worktrees/*'
 
 step "Copying repo archive to guest"
-scp -i "$KEY" -P "$SSH_PORT" \
+scp -i "$KEY" -P "$PORT" \
   -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$KNOWN_HOSTS" \
   "$REPO_ZIP" ubuntu@127.0.0.1:/home/ubuntu/reflex.zip
@@ -367,10 +353,6 @@ else
   step "OPENAI_API_KEY not provided; OpenAI controller runs will no-op."
 fi
 
-SUITE_ARG="--fast"
-if [[ "$FULL" == "1" ]]; then
-  SUITE_ARG="--full"
-fi
 DRY_RUN_ARG=""
 if [[ "$DRY_RUN" == "1" ]]; then
   DRY_RUN_ARG="--dry-run"
@@ -432,52 +414,33 @@ fi
 "\$BPFTOOL_BIN" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
 make -C src/reflex/implementations/ebpf BPFTOOL="\$BPFTOOL_BIN"
 
-UNIXBENCH_DIR="\$HOME/byte-unixbench"
-if [[ ! -x "\$UNIXBENCH_DIR/UnixBench/Run" ]]; then
-  rm -rf "\$UNIXBENCH_DIR"
-  git clone --depth 1 "${UNIXBENCH_URL}" "\$UNIXBENCH_DIR"
-fi
-
-RUN_ROOT="/home/ubuntu/reflex/data/runs/unixbench-\$(date +%Y%m%d-%H%M%S)"
-UNIXBENCH="\$UNIXBENCH_DIR/UnixBench/Run" RUN_ROOT="\$RUN_ROOT" \\
-  bash benchmarks/unixbench_compare.sh --modes "${MODES}" ${SUITE_ARG} ${DRY_RUN_ARG}
-printf '%s\\n' "\$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
+OPENAI_API_KEY="\${OPENAI_API_KEY:-}"
+DAEMON_LOG="/home/ubuntu/reflex/daemon.log"
+DAEMON_PIDFILE="/home/ubuntu/reflex/daemon.pid"
+nohup sudo env OPENAI_API_KEY="\$OPENAI_API_KEY" uv run -- python -m reflex.implementations.main --no-sudo ${DRY_RUN_ARG} ${DAEMON} > "\$DAEMON_LOG" 2>&1 &
+echo \$! > "\$DAEMON_PIDFILE"
+printf '%s\\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$DAEMON_PIDFILE" > /home/ubuntu/reflex/daemon_started.txt
 EOF
 
-step "Running guest setup and UnixBench comparison"
-scp -i "$KEY" -P "$SSH_PORT" \
+step "Running guest setup and starting daemon"
+scp -i "$KEY" -P "$PORT" \
   -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$KNOWN_HOSTS" \
-  "$GUEST_SCRIPT" ubuntu@127.0.0.1:/home/ubuntu/run_reflex_unixbench.sh
-ssh_guest "bash /home/ubuntu/run_reflex_unixbench.sh"
+  "$GUEST_SCRIPT" ubuntu@127.0.0.1:/home/ubuntu/run_reflex_daemon.sh
+ssh_guest "bash /home/ubuntu/run_reflex_daemon.sh"
 rm -f "$GUEST_SCRIPT"
 
-step "Copying results back to host"
-scp -i "$KEY" -P "$SSH_PORT" \
+step "Copying daemon start marker back to host"
+scp -i "$KEY" -P "$PORT" \
   -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$KNOWN_HOSTS" \
-  ubuntu@127.0.0.1:/home/ubuntu/reflex/data/unixbench_results.csv \
-  "${REPO_ROOT}/data/unixbench_results.csv"
-scp -i "$KEY" -P "$SSH_PORT" \
-  -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" \
-  ubuntu@127.0.0.1:/home/ubuntu/reflex/data/last_unixbench_run_root.txt \
+  ubuntu@127.0.0.1:/home/ubuntu/reflex/daemon_started.txt \
   "$RUN_ROOT_FILE"
 
-GUEST_RUN_ROOT="$(tr -d '\r\n' < "$RUN_ROOT_FILE")"
-if [[ -z "$GUEST_RUN_ROOT" ]]; then
-  echo "error: could not determine guest run root" >&2
+MARKER="$(tr -d '\r' < "$RUN_ROOT_FILE")"
+if [[ -z "$MARKER" ]]; then
+  echo "error: daemon start marker was empty" >&2
   exit 1
 fi
-RUN_NAME="$(basename "$GUEST_RUN_ROOT")"
-mkdir -p "${REPO_ROOT}/data/runs"
-scp -r -i "$KEY" -P "$SSH_PORT" \
-  -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" \
-  "ubuntu@127.0.0.1:${GUEST_RUN_ROOT}" \
-  "${REPO_ROOT}/data/runs/"
 
-step "Done"
-echo "Results:"
-echo "  data/unixbench_results.csv"
-echo "  data/runs/${RUN_NAME}"
+step "Daemon started on guest: ${MARKER}"

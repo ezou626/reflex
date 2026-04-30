@@ -99,9 +99,8 @@ def test_reward_uses_direction_and_normalization() -> None:
 
 
 def test_action_generation_clamps_and_noops_on_unsafe_read(tmp_path: Path) -> None:
-    registry = _registry(tmp_path, initial_value=98)
-    summary = _summary()
-    tuners = eligible_tuners(registry, summary)
+    registry = _registry(tmp_path, initial_value=95)
+    tuners = eligible_tuners(registry)
 
     candidate = build_step_candidate(tuners[0], "increase", reason="test")
 

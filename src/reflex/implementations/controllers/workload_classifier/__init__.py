@@ -23,7 +23,7 @@ DEFAULT_LIBRARY_PATH = Path(__file__).resolve().parent / "models" / "library.jso
 
 
 # Adapter map: library feature key (v2) → aggregator metric key (v1).
-# The current CurrentPayloadAggregator emits v1 keys; the trained library uses
+# The current WindowSummaryAggregator emits v1 keys; the trained library uses
 # v2 keys. This map lets the classifier read v1 summaries against v2 centroids
 # without changing the aggregator. See kmeans.py NORMS for the full v2 list.
 _KEY_ALIASES: dict[str, str] = {
@@ -241,20 +241,16 @@ class WorkloadClassifierController:
         actions: list[TunerAction] = []
         for tuner_id, value in best.items():
             tuner = self.registry.get(tuner_id)
-            if tuner is None or not tuner.supports(summary):
+            if tuner is None or not tuner.supports():
                 continue
-            entry = getattr(tuner, "_entry", None)
-            if entry is None:
-                continue
-            actions.append(TunerAction(
-                tuner_id=tuner_id,
+            action = tuner.create_set_action(
+                value,
                 action_id="workload_class_config",
-                target=entry.sysctl,
-                value=value,
                 reason=f"pre-trained config for workload_class={detected}",
-                priority=75,
                 metadata={"workload_class": detected},
-            ))
+            )
+            if action is not None:
+                actions.append(action)
         return actions
 
     async def run(self, ctx: ControllerRunContext) -> None:
@@ -315,7 +311,6 @@ class WorkloadClassifierController:
                 {
                     "controller": "workload_classifier",
                     "action_count": len(actions),
-                    "priority": max(action.priority for action in actions),
                     "tuner_ids": [action.tuner_id for action in actions],
                     "workload_class": actions[0].metadata.get("workload_class"),
                 },

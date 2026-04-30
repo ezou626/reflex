@@ -10,7 +10,7 @@ DESCRIPTION = "Current Reflex eBPF/window aggregator with the heuristic sysctl c
 def create_daemon(args: argparse.Namespace):
     from reflex.core import Daemon, QueueSizes
     from reflex.core.tuners import TunerRegistry
-    from reflex.implementations.aggregators import CurrentPayloadAggregator
+    from reflex.implementations.aggregators import WindowSummaryAggregator
     from reflex.implementations.controllers.heuristic import HeuristicController
 
     registry = TunerRegistry.from_catalog(args.tuner_catalog)
@@ -20,7 +20,7 @@ def create_daemon(args: argparse.Namespace):
     loader_cmd.extend([str(args.loader_binary), str(os.getpid())])
     loader_cmd.extend(str(cgid) for cgid in args.cgroup_id)
     return Daemon(
-        aggregator=CurrentPayloadAggregator(loader_cmd, window_sec=args.window_sec),
+        aggregator=WindowSummaryAggregator(loader_cmd, window_sec=args.window_sec),
         controller=HeuristicController(registry),
         queue_sizes=QueueSizes(
             samples=args.sample_queue_size,

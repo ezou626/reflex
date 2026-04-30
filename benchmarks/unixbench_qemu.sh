@@ -249,7 +249,8 @@ if [[ -z "${BPFTOOL_BIN}" ]]; then
   echo "error: bpftool not found after installing linux-tools packages" >&2
   exit 1
 fi
-make -C implementations/ebpf BPFTOOL="${BPFTOOL_BIN}"
+"${BPFTOOL_BIN}" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
+make -C src/reflex/implementations/ebpf BPFTOOL="${BPFTOOL_BIN}"
 
 UNIXBENCH_DIR="${HOME}/byte-unixbench"
 if [[ ! -x "${UNIXBENCH_DIR}/UnixBench/Run" ]]; then
@@ -258,9 +259,7 @@ if [[ ! -x "${UNIXBENCH_DIR}/UnixBench/Run" ]]; then
 fi
 
 UNIXBENCH="${UNIXBENCH_DIR}/UnixBench/Run" MODES="${MODES}" bash benchmarks/unixbench_compare.sh
-echo "[guest] results:"
-cat data/unixbench_results.csv
 GUEST
 
 echo "[unixbench-qemu] complete"
-echo "  results: ${REPO_ROOT}/data/unixbench_results.csv"
+echo "  results: ${REPO_ROOT}/data/runs/"

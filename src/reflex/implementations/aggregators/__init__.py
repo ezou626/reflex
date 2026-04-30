@@ -1,6 +1,6 @@
 from reflex.implementations.aggregators.current_payload import (
-    CurrentPayloadAggregator,
-    decode_payload,
+    WindowSummaryAggregator,
+    decode_summary,
 )
 
-__all__ = ["CurrentPayloadAggregator", "decode_payload"]
+__all__ = ["WindowSummaryAggregator", "decode_summary"]

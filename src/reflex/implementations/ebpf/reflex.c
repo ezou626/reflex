@@ -1,6 +1,6 @@
 /*
  * reflex.c (loader2-based) — aggregates eBPF events in userspace and emits
- * one compact summary record per WINDOW_NS instead of forwarding every event.
+ * one compact summary record per configured window instead of forwarding every event.
  *
  * Per-window summary (36 bytes packed):
  *     u64 window_end_ns
@@ -26,7 +26,7 @@
 #define CGROUP_FILE "/tmp/reflex_cgroups"
 #define MAX_CGROUP_IDS 256
 #define MAX_LAT_SAMPLES 32768
-#define WINDOW_NS 1000000000ULL /* 1 second */
+#define DEFAULT_WINDOW_NS 1000000000ULL /* 1 second */
 
 /* Must match reflex.bpf.c EVENT_* constants. */
 #define EVENT_FORK 2
@@ -77,6 +77,7 @@ static uint32_t ctx_switch_count = 0;
 static uint32_t direct_reclaim_count = 0;
 static uint32_t fork_count = 0;
 static uint64_t window_start_ns = 0;
+static uint64_t window_ns = DEFAULT_WINDOW_NS;
 
 static uint64_t now_ns(void)
 {
@@ -99,6 +100,19 @@ static uint32_t compute_p95(uint32_t *buf, int n)
         return 0;
     qsort(buf, n, sizeof(buf[0]), cmp_u32);
     return buf[(int)(0.95 * (n - 1))];
+}
+
+static void configure_window(void)
+{
+    const char *raw = getenv("REFLEX_WINDOW_SEC");
+    if (!raw || !*raw)
+        return;
+    double sec = strtod(raw, NULL);
+    if (sec <= 0.0)
+        return;
+    window_ns = (uint64_t)(sec * 1000000000.0);
+    if (window_ns == 0)
+        window_ns = DEFAULT_WINDOW_NS;
 }
 
 static void flush_summary(void)
@@ -182,7 +196,7 @@ static int handle_event(void *ctx, void *data, size_t data_size)
             blk_lat[blk_lat_n++] = p->value_u32;
         break;
     case EVENT_SCHED_SWITCH:
-        ctx_switch_count++;
+        ctx_switch_count += p->value_u32 ? p->value_u32 : 1;
         break;
     case EVENT_DIRECT_RECLAIM:
         direct_reclaim_count++;
@@ -200,6 +214,7 @@ static int handle_event(void *ctx, void *data, size_t data_size)
 int main(int argc, char **argv)
 {
     uint32_t py_pid = 0;
+    configure_window();
     if (argc > 1)
     {
         py_pid = strtoul(argv[1], NULL, 10);
@@ -258,7 +273,7 @@ int main(int argc, char **argv)
     {
         ring_buffer__poll(rb, 100);
         check_cgroup_file();
-        if (now_ns() - window_start_ns >= WINDOW_NS)
+        if (now_ns() - window_start_ns >= window_ns)
             flush_summary();
     }
 

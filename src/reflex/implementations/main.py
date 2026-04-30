@@ -63,6 +63,12 @@ def _add_common_args(parser: argparse.ArgumentParser, root: Path) -> None:
 
 async def _run(args: argparse.Namespace, config: ModuleType) -> None:
     daemon = config.create_daemon(args)
+    daemon.event_retention = None if args.event_retention < 0 else args.event_retention
+    daemon.execution_result_retention = (
+        None
+        if args.execution_result_retention < 0
+        else args.execution_result_retention
+    )
     if args.run_dir is not None:
         run_dir = args.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +130,18 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-sudo", action="store_true")
     parser.add_argument("--run-id", default=None)
+    parser.add_argument(
+        "--event-retention",
+        type=int,
+        default=4096,
+        help="Maximum in-memory daemon events retained; use -1 for unlimited.",
+    )
+    parser.add_argument(
+        "--execution-result-retention",
+        type=int,
+        default=1024,
+        help="Maximum in-memory execution results retained; use -1 for unlimited.",
+    )
     parser.add_argument(
         "--run-dir",
         type=Path,

@@ -22,7 +22,7 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
 def create_daemon(args: argparse.Namespace):
     from reflex.core import Daemon, QueueSizes
     from reflex.core.tuners import TunerRegistry
-    from reflex.implementations.aggregators import CurrentPayloadAggregator
+    from reflex.implementations.aggregators import WindowSummaryAggregator
     from reflex.implementations.controllers.workload_classifier import (
         DEFAULT_LIBRARY_PATH,
         WorkloadClassifier,
@@ -38,7 +38,7 @@ def create_daemon(args: argparse.Namespace):
     loader_cmd.extend([str(args.loader_binary), str(os.getpid())])
     loader_cmd.extend(str(cgid) for cgid in args.cgroup_id)
     return Daemon(
-        aggregator=CurrentPayloadAggregator(loader_cmd, window_sec=args.window_sec),
+        aggregator=WindowSummaryAggregator(loader_cmd, window_sec=args.window_sec),
         controller=WorkloadClassifierController(
             registry,
             classifier,

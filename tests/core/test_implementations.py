@@ -5,7 +5,7 @@ import struct
 from typing import Any
 
 from reflex.core.tuners import AppliedAction, TunerAction
-from reflex.implementations.aggregators import decode_payload
+from reflex.implementations.aggregators import decode_summary
 from reflex.implementations.controllers import (
     ContextualBanditController,
     HeuristicController,
@@ -47,12 +47,14 @@ def test_reflex_implementation_imports() -> None:
     assert TunerActionExecutor is not None
 
 
-def test_current_payload_decoder_exec_event() -> None:
-    chunk = struct.pack("=IIIIQiI16s", 1, 0, 123, 123, 99, 0, 0, b"cmd\0")
-    event = decode_payload(chunk)
-    assert event["event_name"] == "exec"
-    assert event["pid"] == 123
-    assert event["comm"] == "cmd"
+def test_current_payload_decoder_summary_record() -> None:
+    chunk = struct.pack("=QIIIIIII", 99, 45, 100, 5, 67, 300, 2, 4)
+    summary = decode_summary(chunk, window_sec=2.0, received_ts=1000.0)
+    assert summary["record_type"] == "window_summary"
+    assert summary["loader_window_end_ns"] == 99
+    assert summary["metrics"]["rq_latency_p95_us"] == 45
+    assert summary["metrics"]["syscall_error_rate"] == 0.05
+    assert summary["event_counts"]["sched_switch"] == 300
 
 
 def test_reflex_main_discovers_daemon_configs() -> None:

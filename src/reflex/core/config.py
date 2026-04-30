@@ -26,6 +26,8 @@ class Daemon:
     triggers: list[TriggerFactory] = field(default_factory=list)
     queue_sizes: QueueSizes = field(default_factory=QueueSizes)
     dry_run: bool = False
+    event_retention: int | None = 4096
+    execution_result_retention: int | None = 1024
     terminate_on_user_error: bool = False
     on_start: RuntimeHook | None = None
     on_ready: RuntimeHook | None = None

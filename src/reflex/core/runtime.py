@@ -94,6 +94,7 @@ class Runtime:
             metadata=metadata or {},
         )
         self.events.append(event)
+        self._trim_retained(self.events, self.daemon.event_retention)
         return event
 
     async def _handle_error(self, source: str, exc: BaseException) -> None:
@@ -221,6 +222,10 @@ class Runtime:
                     error=f"{type(exc).__name__}: {exc}",
                 )
             self.execution_results.append(result)
+            self._trim_retained(
+                self.execution_results,
+                self.daemon.execution_result_retention,
+            )
             await self.log_event(
                 "executor_completed",
                 f"executor completed: {scheduled.executor_name}",
@@ -297,3 +302,11 @@ class Runtime:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    @staticmethod
+    def _trim_retained(items: list[Any], limit: int | None) -> None:
+        if limit is None or limit < 0:
+            return
+        excess = len(items) - limit
+        if excess > 0:
+            del items[:excess]

@@ -1,9 +1,10 @@
 <#
-Run the UnixBench comparison inside an Ubuntu guest booted by QEMU on Windows.
+Start a Reflex daemon inside an Ubuntu guest booted by QEMU on Windows.
 
 This is a Windows-native runner: no Git Bash, WSL, cloud-localds, or 9p mount is
 required. It creates a NoCloud seed ISO with PowerShell, boots QEMU with WHPX,
-copies the repo into the guest over SSH, and runs benchmarks/unixbench_compare.sh.
+copies the repo into the guest over SSH, builds the eBPF loader, and starts the
+selected daemon.
 
 Run from the repo root:
   powershell -ExecutionPolicy Bypass -File scripts\run_in_qemu.ps1 -Daemon "heuristic"
@@ -29,7 +30,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Daemon)) {
-	throw "-Daemon is required. Pass a daemon name, e.g.: -Daemon \"heuristic\""
+	throw "-Daemon is required. Pass a daemon name, e.g.: -Daemon `"heuristic`""
+}
+if ($Daemon -notmatch '^[A-Za-z0-9_.-]+$') {
+	throw "Daemon name must contain only letters, numbers, '.', '_', or '-'."
 }
 
 function Write-Step {
@@ -173,19 +177,19 @@ function New-RepoArchive {
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
-$CacheDir = Join-Path $repoRoot \"data\\qemu-windows\"
-$UbuntuImageUrl = \"https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img\"
+$CacheDir = Join-Path $repoRoot "data\qemu-windows"
+$UbuntuImageUrl = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot \"data\") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "data") | Out-Null
 
 # Load OPENAI_API_KEY from env or .env
 $OpenAIApiKey = $env:OPENAI_API_KEY
 if ([string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
-	$dotEnvPath = Join-Path $repoRoot \".env\"
-	$OpenAIApiKey = Get-DotEnvValue -Path $dotEnvPath -Name \"OPENAI_API_KEY\"
+	$dotEnvPath = Join-Path $repoRoot ".env"
+	$OpenAIApiKey = Get-DotEnvValue -Path $dotEnvPath -Name "OPENAI_API_KEY"
 	if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
-		Write-Step \"Loaded OPENAI_API_KEY from .env\"
+		Write-Step "Loaded OPENAI_API_KEY from .env"
 	}
 }
 
@@ -322,7 +326,7 @@ $qemuProc.ProcessorAffinity = [IntPtr]0xFF  # P-cores; adjust mask as needed
 try {
 	New-Item -ItemType File -Force -Path $KnownHosts | Out-Null
 	Write-Step "Waiting for SSH"
-	Wait-ForSsh -KeyPath $Key -SshPort $Port
+	Wait-ForSsh -KeyPath $Key -Port $Port
 
 	Write-Step "Preparing repo archive"
 	New-RepoArchive -SourceRoot $repoRoot -ZipPath $repoZip
@@ -336,7 +340,7 @@ try {
 		throw "scp repo archive failed"
 	}
 
-	Write-Step "Running guest setup and UnixBench comparison"
+	Write-Step "Running guest setup and starting daemon"
 	$openAiExportLine = ""
 	if (-not [string]::IsNullOrWhiteSpace($OpenAIApiKey)) {
 		# Avoid brittle quote escaping by passing the key as base64 and decoding in guest.
@@ -401,19 +405,19 @@ if [[ -z "$BPFTOOL_BIN" ]]; then
 	exit 1
 fi
 "$BPFTOOL_BIN" btf dump file /sys/kernel/btf/vmlinux format c > src/vmlinux.h
-make -C implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
+make -C src/reflex/implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 
-# Start the configured daemon (implementations.main) as a background service.
+# Start the configured daemon as a background service.
 # Use sudo + env to ensure it has required privileges and receives OPENAI key.
+OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 DAEMON_LOG="/home/ubuntu/reflex/daemon.log"
 DAEMON_PIDFILE="/home/ubuntu/reflex/daemon.pid"
-nohup sudo env OPENAI_API_KEY="$OPENAI_API_KEY" uv run -- python -m implementations.main > "$DAEMON_LOG" 2>&1 &
+nohup sudo env OPENAI_API_KEY="$OPENAI_API_KEY" uv run -- python -m reflex.implementations.main --no-sudo __DRYRUN__ __DAEMON__ > "$DAEMON_LOG" 2>&1 &
 echo $! > "$DAEMON_PIDFILE"
 printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DAEMON_PIDFILE" > /home/ubuntu/reflex/daemon_started.txt
 '@
-	$suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
 	$dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
-	$guestScript = $guestScript.Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
+	$guestScript = $guestScript.Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine).Replace("__DAEMON__", $Daemon).Replace("__DRYRUN__", $dryRunArg)
 	$guestScript = $guestScript -replace "`r", ""
 	$encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
 	Invoke-Guest "echo $encoded | base64 -d > /home/ubuntu/run_reflex_daemon.sh && bash /home/ubuntu/run_reflex_daemon.sh"
