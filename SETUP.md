@@ -1,6 +1,12 @@
 # Reflex Setup Instructions
 
-## How to Run Quickly
+## Get Started
+
+This will help you run a benchmark. Please ensure you have root access.
+
+### Linux/MacOS
+
+KVM is needed
 
 ```bash
 # bash
@@ -9,6 +15,10 @@
 ./benchmarks/unixbench_qemu.sh
 ```
 
+### Windows
+
+Hardware virtualization needed
+
 ```powershell
 # windows
 .\scripts\setup_windows.ps1
@@ -16,7 +26,7 @@
 powershell -ExecutionPolicy Bypass -File .\benchmarks\unixbench_qemu.ps1 -Modes "classifier,heuristic"
 ```
 
-Please ensure you have root access.
+### Description
 
 This project aims to follow a multi-step approach, combining work from KConfigTune and KernTune to create a pre-trained workload-optimized tuning setup for Linux,
 which is then applied in real time based on clustering to fit the fingerprint of the current running workload.

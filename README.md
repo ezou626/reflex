@@ -1,43 +1,33 @@
-## Reflex repo quickstart
+# Reflex
 
-- **Clone and setup**
-  - `git clone <this-repo>`
-  - `cd reflex`
-  - `git submodule update --init external/KernMLOps external/bpftune` (optional; references for eBPF/BCC patterns and tuning architecture)
-  - `scripts/setup_dev_env.sh`
+Kernel-optimizing daemons with eBPF
 
-- **Key directories**
-  - `TODO.md` – backlog for **extra host / benchmark metrics** (implemented vs planned).
-  - `ebpf/` – eBPF programs (e.g. MVP ring buffer)
-  - `daemon_core/` – async daemon orchestration framework
-  - `implementations/` – runnable daemon_core programs and local assets
-  - `scripts/` – `setup_dev_env.sh`, `test_mvp_qemu.sh`, etc.
-  - `src/reflex/` – Python package stub for uv
-  - `external/KernMLOps/` – optional reference submodule
-  - `external/bpftune/` – optional baseline reference for tuner/event concepts ([oracle/bpftune](https://github.com/oracle/bpftune))
+## TLDR
 
-- **MVP: ring buffer → JSONL files (on the host)**
-  - **Requires a real Linux environment** (bare metal, VM, or WSL2 with eBPF/BCC working) and **root** to load programs.
-  - **Dependencies:** run `scripts/setup_dev_env.sh` once. It installs **`python3-bpfcc`** (and friends) from apt and runs **`uv venv --system-site-packages`** so `uv run` can import the distro **bcc** module. If `import bcc` fails, re-run setup or: `uv venv --system-site-packages --allow-existing && uv sync`.
-  - Loads `ebpf/mvp_ringbuf.bpf.c` via BCC and collects Phase-1 metrics:
-    - process churn (`fork`/`exec`/`exit`)
-    - context switch rate (`sched_switch`)
-    - syscall error rate (`raw_syscalls:sys_exit`)
-    - wakeup->oncpu latency (`sched_wakeup` + `sched_switch`)
-  - Run from repo root:
-    - `sudo uv run python -m implementations.main heuristic`
-    - `sudo uv run python -m implementations.main classifier`
-    - `sudo uv run python -m implementations.main hillclimb --dry-run`
-    - `sudo uv run python -m implementations.main bandit --dry-run`
-    - `sudo uv run python -m implementations.main openai --dry-run`
-    - Optional: `--timeout-ms 200 --window-sec 1.0 --proc-sample-sec 1.0`
-  - Stop with **Ctrl+C**.
-  - Outputs:
-    - Raw events JSONL (`data/mvp_events.jsonl` by default)
-    - Window summaries JSONL (`data/mvp_summary.jsonl` by default)
-  - Feature contracts and ML-oriented schema live in `configs/features_schema.yaml`.
-  - Feature contracts and ML-oriented schema live in `configs/features_schema.yaml`.
-  - Additional source catalog (for future collectors) lives in `docs/metrics_catalog.md`.
+Aiming to improve system performance as measured by Unixbench, sysbench (WIP), and common scenarios (WIP)
+
+## How to Run
+
+1. Setup your environment [here](./SETUP.md)
+
+## Directory
+
+### Tracked
+
+- `benchmarks/`: benchmarking scripts
+- `bpftool/`: No idea actually
+- `configs/`: Configs/schemas for data, tuners, and parameters
+- `info/`: Some outputs on available tuners
+- `runs/`: K-means clustering results
+- `scripts/`: Setup, training, and stressor scripts
+- `src/`: Daemon interface + implementations
+- `tests/`: Lowkey a goofy folder
+
+### Not Tracked
+
+- `data/`: Test data goes in here
+
+## How It Works
 
 - **MVP in QEMU/KVM (Ubuntu cloud image)**
   - Needs read access to `/dev/kvm` (add your user to group `kvm` and re-open WSL, or run the script with `sudo`).

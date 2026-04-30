@@ -5,3 +5,5 @@
 - [ ] Benchmark all daemons with sysbench
 - [ ] Find scenarios where existing controllers beat
 - [ ] Fix OpenAI controller
+- [ ] Make SETUP.md shorter
+- [ ] Add architecture in README.md
