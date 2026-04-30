@@ -13,6 +13,9 @@ KVM/HVF is needed for practical QEMU performance.
 ./scripts/setup.sh
 # start the QEMU VM and run the configured mode
 bash ./scripts/run_in_qemu.sh --daemon heuristic
+
+# compare daemon overhead with sysbench inside QEMU
+MODES=workload_only,heuristic,classifier bash ./benchmarks/sysbench_qemu.sh --test cpu
 ```
 
 ### Windows

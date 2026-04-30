@@ -47,12 +47,14 @@ def test_reflex_implementation_imports() -> None:
     assert TunerActionExecutor is not None
 
 
-def test_current_payload_decoder_summary_record() -> None:
-    chunk = struct.pack("=QIIIIIII", 99, 45, 100, 5, 67, 300, 2, 4)
+def test_window_summary_decoder_summary_record() -> None:
+    chunk = struct.pack("=QIIIIIIIIII", 99, 45, 8, 100, 5, 67, 9, 300, 2, 89, 4)
     summary = decode_summary(chunk, window_sec=2.0, received_ts=1000.0)
     assert summary["record_type"] == "window_summary"
     assert summary["loader_window_end_ns"] == 99
     assert summary["metrics"]["rq_latency_p95_us"] == 45
+    assert summary["metrics"]["rq_latency_count"] == 8
+    assert summary["metrics"]["direct_reclaim_lat_p95_us"] == 89
     assert summary["metrics"]["syscall_error_rate"] == 0.05
     assert summary["event_counts"]["sched_switch"] == 300
 

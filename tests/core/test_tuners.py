@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from reflex.core.tuners import TunerAction
-from reflex.core.tuners.loaders import load_tuner_catalog
+from reflex.core.tuners.catalog import ALL_TUNERS
 from reflex.core.tuners.schema import TunerCatalogEntry
 from reflex.core.tuners.sysctl import GenericSysctlTuner
 from reflex.core.tuners.sysctl_util import read_sysctl, write_sysctl
@@ -21,29 +21,10 @@ def test_v2_sysctl_tuner_has_no_rollback_method() -> None:
     assert not hasattr(tuner, "rollback")
 
 
-def test_v2_catalog_loader_ignores_boot_cmdline_tuners(tmp_path: Path) -> None:
-    catalog = tmp_path / "catalog.yaml"
-    catalog.write_text(
-        """
-version: 1
-tuners:
-  - id: sysctl_vm_swappiness
-    category: vm
-    description: runtime
-    kind: int
-    scope: runtime_sysctl
-    sysctl: vm.swappiness
-  - id: boot_numa_balancing
-    category: boot
-    description: boot
-    kind: str
-    scope: boot_cmdline
-    cmdline_key: numa_balancing
-""",
-        encoding="utf-8",
-    )
-    doc = load_tuner_catalog(catalog)
-    assert [t.id for t in doc.tuners] == ["sysctl_vm_swappiness"]
+def test_v2_catalog_only_has_sysctl_tuners() -> None:
+    for t in ALL_TUNERS:
+        assert t._entry.scope == "runtime_sysctl"
+        assert t._entry.sysctl
 
 
 def test_v2_sysctl_read_write_int(tmp_path: Path) -> None:

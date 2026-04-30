@@ -1,23 +1,19 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from reflex.core.tuners.loaders import load_tuner_catalog
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
+from reflex.core.tuners.catalog import ALL_TUNERS
 
 
 def test_tuner_catalog_loads() -> None:
-    doc = load_tuner_catalog(REPO_ROOT / "configs" / "tuner_catalog.yaml")
-    ids = [e.id for e in doc.tuners]
-    assert len(ids) == len(set(ids))
-    for e in doc.tuners:
-        assert e.id and e.category and e.description
-        assert e.kind in ("int", "ints", "str")
-        if e.scope == "runtime_sysctl":
-            assert e.sysctl and ".." not in e.sysctl and not e.sysctl.startswith("/")
+    ids = [t.tuner_id for t in ALL_TUNERS]
+    assert len(ids) == len(set(ids)), "duplicate tuner IDs in catalog"
+    for t in ALL_TUNERS:
+        entry = t._entry
+        assert entry.id and entry.category and entry.description
+        assert entry.kind in ("int", "ints", "str")
+        sysctl = entry.sysctl
+        assert sysctl and ".." not in sysctl and not sysctl.startswith("/")
 
 
 @pytest.mark.skip(reason="parse_proc_cmdline and boot_cmdline tuner support removed in src/ restructure")

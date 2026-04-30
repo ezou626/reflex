@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +138,23 @@ def test_openai_validation_schedules_only_when_apply_allowed(tmp_path: Path) -> 
         assert ctx.executors == []
 
     asyncio.run(scenario())
+
+
+def test_openai_make_client_uses_sdk_package(monkeypatch: Any, tmp_path: Path) -> None:
+    class FakeSDKOpenAI:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = FakeSDKOpenAI
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    controller = OpenAITuningController(_registry(tmp_path), timeout_sec=3.0)
+
+    client = controller._make_client()
+
+    assert isinstance(client, FakeSDKOpenAI)
+    assert client.kwargs == {"timeout": 3.0}
 
 
 def test_hillclimb_exposes_pending_action_and_blocks_overlap(tmp_path: Path) -> None:

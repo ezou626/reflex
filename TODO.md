@@ -1,4 +1,4 @@
-- [ ] Setup sysbench benchmarking for daemons
+- [x] Setup sysbench benchmarking for daemons
 - [ ] Setup Phoronix benchmarking for daemons\*
 - [ ] Reduce performance overhead for daemons
 - [ ] Benchmark all daemons with Unixbench
@@ -7,4 +7,5 @@
 - [ ] Fix OpenAI controller
 - [ ] Make SETUP.md shorter
 - [ ] Add architecture in README.md
+- [ ] Add description/details about controllers in some md file
 - [ ] Add build BPFTool from source if bpftool fails in [setup.sh](./scripts/setup.sh)
