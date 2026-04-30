@@ -2,14 +2,17 @@
  * reflex.c (loader2-based) — aggregates eBPF events in userspace and emits
  * one compact summary record per configured window instead of forwarding every event.
  *
- * Per-window summary (36 bytes packed):
+ * Per-window summary (48 bytes packed):
  *     u64 window_end_ns
  *     u32 rq_p95_us
+ *     u32 rq_latency_count
  *     u32 syscall_count
  *     u32 failure_count
  *     u32 blk_p95_us
+ *     u32 blk_latency_count
  *     u32 ctx_switch_count
  *     u32 direct_reclaim_count
+ *     u32 direct_reclaim_p95_us
  *     u32 fork_count
  */
 #include <bpf/libbpf.h>
@@ -53,13 +56,18 @@ struct summary
 {
     uint64_t window_end_ns;
     uint32_t rq_p95_us;
+    uint32_t rq_latency_count;
     uint32_t syscall_count;
     uint32_t failure_count;
     uint32_t blk_p95_us;
+    uint32_t blk_latency_count;
     uint32_t ctx_switch_count;
     uint32_t direct_reclaim_count;
+    uint32_t direct_reclaim_p95_us;
     uint32_t fork_count;
 } __attribute__((packed));
+
+_Static_assert(sizeof(struct summary) == 48, "summary ABI must match Python decoder");
 
 static struct reflex_bpf *g_skel = NULL;
 static uint64_t loaded_cgids[MAX_CGROUP_IDS];
@@ -71,6 +79,8 @@ static uint32_t rq_lat[MAX_LAT_SAMPLES];
 static int rq_lat_n = 0;
 static uint32_t blk_lat[MAX_LAT_SAMPLES];
 static int blk_lat_n = 0;
+static uint32_t reclaim_lat[MAX_LAT_SAMPLES];
+static int reclaim_lat_n = 0;
 static uint32_t syscall_count = 0;
 static uint32_t failure_count = 0;
 static uint32_t ctx_switch_count = 0;
@@ -120,11 +130,14 @@ static void flush_summary(void)
     struct summary s = {
         .window_end_ns = now_ns(),
         .rq_p95_us = compute_p95(rq_lat, rq_lat_n),
+        .rq_latency_count = (uint32_t)rq_lat_n,
         .syscall_count = syscall_count,
         .failure_count = failure_count,
         .blk_p95_us = compute_p95(blk_lat, blk_lat_n),
+        .blk_latency_count = (uint32_t)blk_lat_n,
         .ctx_switch_count = ctx_switch_count,
         .direct_reclaim_count = direct_reclaim_count,
+        .direct_reclaim_p95_us = compute_p95(reclaim_lat, reclaim_lat_n),
         .fork_count = fork_count,
     };
 
@@ -133,6 +146,7 @@ static void flush_summary(void)
 
     rq_lat_n = 0;
     blk_lat_n = 0;
+    reclaim_lat_n = 0;
     syscall_count = 0;
     failure_count = 0;
     ctx_switch_count = 0;
@@ -200,6 +214,8 @@ static int handle_event(void *ctx, void *data, size_t data_size)
         break;
     case EVENT_DIRECT_RECLAIM:
         direct_reclaim_count++;
+        if (reclaim_lat_n < MAX_LAT_SAMPLES)
+            reclaim_lat[reclaim_lat_n++] = p->value_u32;
         break;
     case EVENT_FORK:
         fork_count++;

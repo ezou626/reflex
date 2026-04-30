@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-_SUMMARY_FMT = "=QIIIIIII"
+_SUMMARY_FMT = "=QIIIIIIIIII"
 _SUMMARY_SIZE = struct.calcsize(_SUMMARY_FMT)
 
 
@@ -54,11 +54,14 @@ def decode_summary(
     (
         window_end_ns,
         rq_p95_us,
+        rq_latency_count,
         syscall_count,
         failure_count,
         blk_p95_us,
+        blk_latency_count,
         ctx_switch_count,
         direct_reclaim_count,
+        direct_reclaim_p95_us,
         fork_count,
     ) = struct.unpack(_SUMMARY_FMT, chunk)
     now_ts = time.time() if received_ts is None else received_ts
@@ -74,15 +77,12 @@ def decode_summary(
             "context_switch_rate_per_sec": round(int(ctx_switch_count) / window_sec, 3),
             "syscall_error_rate": round(int(failure_count) / total_sys, 6),
             "syscall_error_rate_per_sec": round(int(failure_count) / window_sec, 3),
-            "rq_latency_p50_us": 0,
             "rq_latency_p95_us": int(rq_p95_us),
-            "rq_latency_p99_us": int(rq_p95_us),
-            "rq_latency_count": 0,
+            "rq_latency_count": int(rq_latency_count),
             "direct_reclaim_rate_per_sec": round(int(direct_reclaim_count) / window_sec, 3),
-            "direct_reclaim_lat_p95_us": 0,
-            "blk_latency_p50_us": 0,
+            "direct_reclaim_lat_p95_us": int(direct_reclaim_p95_us),
             "blk_latency_p95_us": int(blk_p95_us),
-            "blk_latency_count": 0,
+            "blk_latency_count": int(blk_latency_count),
         },
         "event_counts": {
             "fork": int(fork_count),

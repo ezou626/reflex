@@ -29,7 +29,7 @@ def create_daemon(args: argparse.Namespace):
         WorkloadClassifierController,
     )
 
-    registry = TunerRegistry.from_catalog(args.tuner_catalog)
+    registry = TunerRegistry.default()
     library_path = args.classifier_library or DEFAULT_LIBRARY_PATH
     classifier = WorkloadClassifier(library_path, max_distance=args.classifier_max_distance)
     loader_cmd: list[str] = []

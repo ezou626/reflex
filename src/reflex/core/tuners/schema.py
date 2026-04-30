@@ -22,7 +22,3 @@ class TunerCatalogEntry:
     step: int | float = 1
 
 
-@dataclass
-class TunerCatalogDoc:
-    version: int = 1
-    tuners: list[TunerCatalogEntry] = field(default_factory=list)

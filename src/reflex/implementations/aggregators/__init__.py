@@ -1,4 +1,4 @@
-from reflex.implementations.aggregators.current_payload import (
+from reflex.implementations.aggregators.window_summary import (
     WindowSummaryAggregator,
     decode_summary,
 )

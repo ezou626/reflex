@@ -48,12 +48,6 @@ def _add_common_args(parser: argparse.ArgumentParser, root: Path) -> None:
         default=root / "implementations" / "ebpf" / "build" / "reflex",
         help="Path to the implementation-local loader binary.",
     )
-    parser.add_argument(
-        "--tuner-catalog",
-        type=Path,
-        default=root / "configs" / "tuner_catalog.yaml",
-        help="Path to the tuner catalog.",
-    )
     parser.add_argument("--window-sec", type=float, default=1.0)
     parser.add_argument("--cgroup-id", action="append", type=int, default=[])
     parser.add_argument("--sample-queue-size", type=int, default=1024)
@@ -79,7 +73,6 @@ async def _run(args: argparse.Namespace, config: ModuleType) -> None:
             "dry_run": args.dry_run,
             "no_sudo": args.no_sudo,
             "loader_binary": str(args.loader_binary),
-            "tuner_catalog": str(args.tuner_catalog),
             "window_sec": args.window_sec,
             "cgroup_id": args.cgroup_id,
         }

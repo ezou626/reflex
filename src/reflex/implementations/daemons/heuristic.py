@@ -13,7 +13,7 @@ def create_daemon(args: argparse.Namespace):
     from reflex.implementations.aggregators import WindowSummaryAggregator
     from reflex.implementations.controllers.heuristic import HeuristicController
 
-    registry = TunerRegistry.from_catalog(args.tuner_catalog)
+    registry = TunerRegistry.default()
     loader_cmd: list[str] = []
     if not args.no_sudo:
         loader_cmd.append("sudo")

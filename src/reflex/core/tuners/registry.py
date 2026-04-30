@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from reflex.core.tuners.base import BaseTuner
-from reflex.core.tuners.loaders import load_tuner_catalog
-from reflex.core.tuners.sysctl import build_tuner_for_entry
 
 
 class TunerRegistry:
@@ -17,13 +13,10 @@ class TunerRegistry:
         self._enabled = enabled if enabled is not None else {t.tuner_id: True for t in tuners}
 
     @classmethod
-    def from_catalog(cls, catalog_path: Path) -> TunerRegistry:
-        doc = load_tuner_catalog(catalog_path)
-        tuners: list[BaseTuner] = []
-        enabled: dict[str, bool] = {}
-        for entry in doc.tuners:
-            tuners.append(build_tuner_for_entry(entry))
-            enabled[entry.id] = entry.enabled
+    def default(cls) -> TunerRegistry:
+        from reflex.core.tuners.catalog import ALL_TUNERS
+        tuners = list(ALL_TUNERS)
+        enabled = {t.tuner_id: t._entry.enabled for t in ALL_TUNERS}
         return cls(tuners=tuners, enabled=enabled)
 
     def enabled_tuners(self) -> list[BaseTuner]:
