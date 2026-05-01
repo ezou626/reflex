@@ -1,4 +1,4 @@
-from reflex.core.config import Daemon, QueueSizes
+from reflex.core.config import Daemon, QueueSizes, interval_trigger
 from reflex.core.runtime import Runtime
 from reflex.core.types import (
     Aggregator,
@@ -19,6 +19,7 @@ __all__ = [
     "ControllerTrigger",
     "Daemon",
     "DaemonEvent",
+    "interval_trigger",
     "ExecutionResult",
     "Executor",
     "QueueSizes",

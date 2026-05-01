@@ -85,7 +85,7 @@ def test_accept_sample_blocks_when_sample_queue_full() -> None:
         await runtime.accept_sample("first")
         blocked = asyncio.create_task(runtime.accept_sample("second"))
         try:
-            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.05)
+            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.2)
         except TimeoutError:
             pass
         else:
@@ -109,7 +109,7 @@ def test_trigger_controller_blocks_when_controller_queue_full() -> None:
         await runtime.trigger_controller("first")
         blocked = asyncio.create_task(runtime.trigger_controller("second"))
         try:
-            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.05)
+            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.2)
         except TimeoutError:
             pass
         else:
@@ -134,10 +134,6 @@ def test_samples_are_delivered_in_arrival_order_without_parallel_accept_data() -
 
         assert [s.id for s in controller.samples] == [1, 2]
         assert [s.sample for s in controller.samples] == [{"n": 1}, {"n": 2}]
-        assert [e.kind for e in runtime.events[:2]] == [
-            "sample_received",
-            "sample_received",
-        ]
 
     run(scenario())
 
@@ -155,9 +151,6 @@ def test_each_trigger_creates_exactly_one_controller_run() -> None:
         await runtime.shutdown()
 
         assert controller.triggers == [1, 2]
-        assert [e.kind for e in runtime.events].count("trigger_created") == 2
-        assert [e.kind for e in runtime.events].count("controller_run_start") == 2
-        assert [e.kind for e in runtime.events].count("controller_decision") == 2
 
     run(scenario())
 
@@ -181,9 +174,6 @@ def test_executor_queue_is_fifo_single_consumer_and_dry_run_is_passed() -> None:
 
         assert seen == ["a", "b"]
         assert [r.dry_run for r in runtime.execution_results] == [True, True]
-        assert [e.kind for e in runtime.events].count("executor_scheduled") == 2
-        assert [e.kind for e in runtime.events].count("executor_completed") == 2
-        assert [e.id for e in runtime.events] == list(range(1, len(runtime.events) + 1))
 
     run(scenario())
 
@@ -204,8 +194,6 @@ def test_executor_exception_becomes_failed_execution_result() -> None:
         assert not result.ok
         assert result.error is not None
         assert "RuntimeError: boom" in result.error
-        assert runtime.events[-1].kind == "executor_completed"
-        assert runtime.events[-1].metadata["ok"] is False
 
     run(scenario())
 
@@ -222,13 +210,6 @@ def test_controller_failures_are_logged_without_stopping_daemon() -> None:
         await runtime.controller_queue.join()
         assert not runtime._stopping.is_set()
         await runtime.shutdown()
-
-        errors = [e for e in runtime.events if e.kind == "error"]
-        assert len(errors) == 2
-        assert {e.metadata["source"] for e in errors} == {
-            "controller.accept_data",
-            "controller.run",
-        }
 
     run(scenario())
 

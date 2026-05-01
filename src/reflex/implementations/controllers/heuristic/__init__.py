@@ -44,6 +44,8 @@ class HeuristicController:
             "metrics": {
                 "process_churn_rate_per_sec": metrics.get("process_churn_rate_per_sec"),
                 "context_switch_rate_per_sec": metrics.get("context_switch_rate_per_sec"),
+                "syscall_latency_p95_us": metrics.get("syscall_latency_p95_us"),
+                "syscall_error_rate": metrics.get("syscall_error_rate"),
                 "syscall_error_rate_per_sec": metrics.get("syscall_error_rate_per_sec"),
                 "rq_latency_p95_us": metrics.get("rq_latency_p95_us"),
                 "direct_reclaim_rate_per_sec": metrics.get("direct_reclaim_rate_per_sec"),

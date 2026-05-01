@@ -19,6 +19,9 @@ ml = ["torch"]
 dev = ["pytest>=8.0"]
 openai = ["openai>=1.0"]
 
+[project.scripts]
+reflex = "reflex.implementations.main:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

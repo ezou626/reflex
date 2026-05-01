@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -92,8 +93,38 @@ class OpenAITuningController:
     def _current_summary(self) -> dict[str, Any]:
         return self.history[-1][1]
 
+    @staticmethod
+    def _decision_signals_from_summary(summary: dict[str, Any]) -> dict[str, Any]:
+        metrics = summary.get("metrics", {})
+        host = summary.get("host_features", {})
+        return {
+            "window_sec": summary.get("window_sec"),
+            "syscall_latency_p95_us": metrics.get("syscall_latency_p95_us"),
+            "syscall_latency_count": metrics.get("syscall_latency_count"),
+            "syscall_error_rate": metrics.get("syscall_error_rate"),
+            "syscall_error_rate_per_sec": metrics.get("syscall_error_rate_per_sec"),
+            "rq_latency_p95_us": metrics.get("rq_latency_p95_us"),
+            "blk_latency_p95_us": metrics.get("blk_latency_p95_us"),
+            "context_switch_rate_per_sec": metrics.get("context_switch_rate_per_sec"),
+            "direct_reclaim_rate_per_sec": metrics.get("direct_reclaim_rate_per_sec"),
+            "process_churn_rate_per_sec": metrics.get("process_churn_rate_per_sec"),
+            "host_mem_available_ratio": host.get("host_mem_available_ratio"),
+            "host_swap_free_ratio": host.get("host_swap_free_ratio"),
+            "host_cpu_util_pct": host.get("host_cpu_util_pct"),
+            "host_cpu_iowait_pct": host.get("host_cpu_iowait_pct"),
+            "host_load_per_cpu": host.get("host_load_per_cpu"),
+            "host_dirty_kb": host.get("host_dirty_kb"),
+        }
+
+    def _decision_signal_history(self) -> list[dict[str, Any]]:
+        return [
+            self._decision_signals_from_summary(summary)
+            for summary in self._summaries()[-self.history_windows :]
+        ]
+
     def _catalog_payload(self) -> list[dict[str, Any]]:
         tuners = eligible_tuners(self.registry)
+        tuners = self._filter_tuners_by_bottleneck(tuners)
         values = current_values(tuners)
         return [
             {
@@ -109,15 +140,47 @@ class OpenAITuningController:
             if tuner.tuner_id in values
         ]
 
+    def _filter_tuners_by_bottleneck(self, tuners: list[Any]) -> list[Any]:
+        summary = self._current_summary() if self.history else {}
+        host = summary.get("host_features", {})
+        metrics = summary.get("metrics", {})
+        mem_avail = float(host.get("host_mem_available_ratio", 1.0))
+        swap_free = float(host.get("host_swap_free_ratio", 1.0))
+        direct_reclaim_rate = float(metrics.get("direct_reclaim_rate_per_sec", 0.0))
+        memory_bottleneck = (
+            mem_avail <= 0.15
+            or swap_free <= 0.20
+            or direct_reclaim_rate >= 1.0
+        )
+        if memory_bottleneck:
+            return tuners
+        filtered: list[Any] = []
+        for tuner in tuners:
+            category = getattr(getattr(tuner, "tuner", None), "_entry", None)
+            if getattr(category, "category", None) == "vm":
+                continue
+            filtered.append(tuner)
+        return filtered
+
     async def run(self, ctx: ControllerRunContext) -> None:
         if not self.history:
             await ctx.log_decision("openai", "no summaries available", {})
+            await ctx.record_execution_result(
+                ok=False,
+                error="no summaries available",
+                payload={"controller": "openai", "outcome": "noop"},
+            )
             return
         if not os.environ.get("OPENAI_API_KEY") and self.client is None:
             await ctx.log_decision(
                 "openai",
                 "OPENAI_API_KEY missing; no-op",
                 _openai_decision_metadata(noop_candidate("missing api key")),
+            )
+            await ctx.record_execution_result(
+                ok=False,
+                error="OPENAI_API_KEY missing",
+                payload={"controller": "openai", "outcome": "noop"},
             )
             return
         client = self.client or self._make_client()
@@ -127,10 +190,15 @@ class OpenAITuningController:
                 "OpenAI SDK unavailable; no-op",
                 _openai_decision_metadata(noop_candidate("openai sdk unavailable")),
             )
+            await ctx.record_execution_result(
+                ok=False,
+                error="OpenAI SDK unavailable",
+                payload={"controller": "openai", "outcome": "noop"},
+            )
             return
         catalog = self._catalog_payload()
         try:
-            raw = self._request(client, catalog)
+            raw = await asyncio.to_thread(self._request, client, catalog)
         except Exception as exc:  # pragma: no cover - defensive boundary for SDK failures
             await ctx.log_decision(
                 "openai",
@@ -139,6 +207,11 @@ class OpenAITuningController:
                     noop_candidate("openai request failed"),
                     {"error_type": type(exc).__name__},
                 ),
+            )
+            await ctx.record_execution_result(
+                ok=False,
+                error=f"OpenAI request failed: {type(exc).__name__}: {exc}",
+                payload={"controller": "openai", "outcome": "request_failed"},
             )
             return
         candidates = self._validate_response(raw)
@@ -155,6 +228,11 @@ class OpenAITuningController:
                         "tuner_ids": [tuner["tuner_id"] for tuner in catalog],
                     },
                 ),
+            )
+            await ctx.record_execution_result(
+                ok=False,
+                error="OpenAI proposed no valid actions",
+                payload={"controller": "openai", "outcome": "no_valid_actions"},
             )
             return
         candidate = selected[0]
@@ -180,6 +258,22 @@ class OpenAITuningController:
                     "tuner_ids": [candidate.action.tuner_id],
                 },
             )
+            return
+
+        await ctx.record_execution_result(
+            ok=True,
+            payload={
+                "controller": "openai",
+                "outcome": "proposal_validated_not_applied",
+                "allow_apply": self.allow_apply,
+                "action": candidate.action_name,
+                "reason": candidate.reason,
+                "direction": candidate.direction,
+                "current_value": candidate.current_value,
+                "candidate_value": candidate.candidate_value,
+                "metadata": candidate.metadata,
+            },
+        )
 
     def _make_client(self) -> Any | None:
         try:
@@ -192,12 +286,21 @@ class OpenAITuningController:
         prompt = {
             "latest_summary": self._current_summary(),
             "history": self._summaries()[-self.history_windows :],
+            "latest_decision_signals": self._decision_signals_from_summary(
+                self._current_summary()
+            ),
+            "decision_signal_history": self._decision_signal_history(),
             "tuners": catalog,
             "instruction": (
                 "Return JSON actions only. Propose exactly one conservative one-step "
                 "sysctl change from the provided tuner catalog when a safe improvement "
                 "is plausible. Return an empty actions list only when the tuner catalog "
-                "is empty or every available action is unsafe or likely harmful."
+                "is empty or every available action is unsafe or likely harmful. "
+                "Treat syscall_latency_p95_us and syscall_error_rate as first-class "
+                "workload health signals, alongside rq/block latency, reclaim, "
+                "context-switch rate, and host memory/CPU pressure. "
+                "Prefer no-op unless a specific bottleneck is clear. "
+                "Do not tune a subsystem merely because it has headroom. "
             ),
         }
         response = client.responses.create(

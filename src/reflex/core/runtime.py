@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
+import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from reflex.core.config import Daemon
@@ -52,13 +54,36 @@ class _ControllerRunContext:
         meta.update(metadata or {})
         return await self._runtime.log_event("controller_decision", message, meta)
 
+    async def record_execution_result(
+        self,
+        *,
+        ok: bool,
+        payload: Any = None,
+        error: str | None = None,
+        action_records: list[Any] | None = None,
+    ) -> ExecutionResult:
+        return self._runtime.record_execution_result(
+            ok=ok,
+            payload=payload,
+            error=error,
+            action_records=action_records,
+        )
+
     def executor_queue_size(self) -> int:
         return self._runtime.executor_queue_size()
 
 
 class Runtime:
-    def __init__(self, daemon: Daemon) -> None:
+    def __init__(
+        self,
+        daemon: Daemon,
+        *,
+        event_logger: logging.Logger | None = None,
+        execution_logger: logging.Logger | None = None,
+    ) -> None:
         self.daemon = daemon
+        self._event_logger = event_logger
+        self._execution_logger = execution_logger
         self.sample_queue: asyncio.Queue[AggregatorSample] = asyncio.Queue(
             maxsize=daemon.queue_sizes.samples
         )
@@ -68,7 +93,6 @@ class Runtime:
         self.executor_queue: asyncio.Queue[ScheduledExecutor] = asyncio.Queue(
             maxsize=daemon.queue_sizes.executors
         )
-        self.events: list[DaemonEvent] = []
         self.execution_results: list[ExecutionResult] = []
         self._event_ids = itertools.count(1)
         self._sample_ids = itertools.count(1)
@@ -93,9 +117,36 @@ class Runtime:
             message=message,
             metadata=metadata or {},
         )
-        self.events.append(event)
-        self._trim_retained(self.events, self.daemon.event_retention)
+        if self._event_logger is not None:
+            self._event_logger.info(json.dumps(asdict(event), default=str))
         return event
+
+    def record_execution_result(
+        self,
+        *,
+        ok: bool,
+        payload: Any = None,
+        error: str | None = None,
+        action_records: list[Any] | None = None,
+    ) -> ExecutionResult:
+        result = ExecutionResult(
+            ok=ok,
+            dry_run=self.daemon.dry_run,
+            payload=payload,
+            error=error,
+            action_records=action_records or [],
+        )
+        self._append_execution_result(result)
+        return result
+
+    def _append_execution_result(self, result: ExecutionResult) -> None:
+        self.execution_results.append(result)
+        self._trim_retained(
+            self.execution_results,
+            self.daemon.execution_result_retention,
+        )
+        if self._execution_logger is not None:
+            self._execution_logger.info(json.dumps(asdict(result), default=str))
 
     async def _handle_error(self, source: str, exc: BaseException) -> None:
         await self.log_event(
@@ -125,7 +176,7 @@ class Runtime:
         await self.log_event(
             "sample_received",
             "aggregator sample received",
-            {"sample_id": wrapped.id},
+            {"sample_id": wrapped.id, "sample": wrapped.sample},
         )
         return wrapped
 
@@ -184,6 +235,17 @@ class Runtime:
             sample = await self.sample_queue.get()
             try:
                 await self.daemon.controller.accept_data(sample)
+                await self.log_event(
+                    "sample_delivered",
+                    "aggregator sample delivered",
+                    {
+                        "sample_id": sample.id,
+                        "sample": sample.sample,
+                        "delivery_latency_ms": round(
+                            (self._now() - sample.sent_ts) * 1000, 3
+                        ),
+                    },
+                )
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
@@ -216,16 +278,12 @@ class Runtime:
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
-                result = ExecutionResult(
+                result = self.record_execution_result(
                     ok=False,
-                    dry_run=self.daemon.dry_run,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-            self.execution_results.append(result)
-            self._trim_retained(
-                self.execution_results,
-                self.daemon.execution_result_retention,
-            )
+            else:
+                self._append_execution_result(result)
             await self.log_event(
                 "executor_completed",
                 f"executor completed: {scheduled.executor_name}",

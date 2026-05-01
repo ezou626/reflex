@@ -10,6 +10,8 @@
 #   REFLEX_VM_CACHE       cache directory (default: ./data/qemu)
 #   REFLEX_VM_SSH_PORT    host TCP port forwarded to guest :22 (default: 52222)
 #   REFLEX_VM_DISK_GB     guest root disk size in GiB (default: 24)
+#   REFLEX_UNIXBENCH_IMAGE_URL  optional URL for prebaked unixbench image
+#   REFLEX_FALLBACK_IMAGE_URL   fallback Ubuntu cloud image URL
 #   UNIXBENCH_URL         git URL for UnixBench (default: kdlucas/byte-unixbench)
 #   MODES                 comma modes for unixbench_compare.sh
 set -euo pipefail
@@ -21,8 +23,9 @@ cd "${REPO_ROOT}"
 CACHE_DIR="${REFLEX_VM_CACHE:-${REPO_ROOT}/data/qemu}"
 SSH_PORT="${REFLEX_VM_SSH_PORT:-52222}"
 DISK_GB="${REFLEX_VM_DISK_GB:-24}"
-BASE_NAME="noble-server-cloudimg-amd64.img"
-BASE_URL="https://cloud-images.ubuntu.com/noble/current/${BASE_NAME}"
+BASE_NAME="${REFLEX_UNIXBENCH_IMAGE_NAME:-noble-unixbench-deps-amd64.img}"
+BASE_URL="${REFLEX_UNIXBENCH_IMAGE_URL:-}"
+FALLBACK_IMAGE_URL="${REFLEX_FALLBACK_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 BASE_IMG="${CACHE_DIR}/${BASE_NAME}"
 OVERLAY="${CACHE_DIR}/unixbench-overlay-$$.qcow2"
 SEED_ISO="${CACHE_DIR}/unixbench-seed-$$.img"
@@ -99,13 +102,30 @@ if [[ ! -f "${KEY}" ]]; then
 fi
 
 if [[ ! -f "${BASE_IMG}" ]]; then
-  echo "[unixbench-qemu] downloading ${BASE_URL}"
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 -o "${BASE_IMG}.part" "${BASE_URL}"
+  if [[ -n "${BASE_URL}" ]]; then
+    echo "[unixbench-qemu] downloading VM base image ${BASE_URL}"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL --retry 3 -o "${BASE_IMG}.part" "${BASE_URL}"
+    else
+      wget -O "${BASE_IMG}.part" "${BASE_URL}"
+    fi
+    mv "${BASE_IMG}.part" "${BASE_IMG}"
   else
-    wget -O "${BASE_IMG}.part" "${BASE_URL}"
+    echo "[unixbench-qemu] prebaked image missing; building it now via bake_unixbench_image.sh"
+    BAKE_SSH_PORT="$((SSH_PORT + 100))"
+    if [[ "${BAKE_SSH_PORT}" -gt 65535 ]]; then
+      BAKE_SSH_PORT=52223
+    fi
+    REFLEX_VM_CACHE="${CACHE_DIR}" \
+    REFLEX_VM_SSH_PORT="${BAKE_SSH_PORT}" \
+    REFLEX_BAKE_SOURCE_URL="${FALLBACK_IMAGE_URL}" \
+    REFLEX_BAKE_OUTPUT_IMG="${BASE_NAME}" \
+      bash "${SCRIPT_DIR}/bake_unixbench_image.sh"
+    if [[ ! -f "${BASE_IMG}" ]]; then
+      echo "error: bake completed but image is still missing: ${BASE_IMG}" >&2
+      exit 1
+    fi
   fi
-  mv "${BASE_IMG}.part" "${BASE_IMG}"
 fi
 
 META_DATA="$(mktemp)"
@@ -125,8 +145,14 @@ growpart:
   devices: ["/"]
   ignore_growroot_disabled: false
 resize_rootfs: true
-ssh_authorized_keys:
-  - ${PUB_LINE}
+users:
+  - name: ubuntu
+    shell: /bin/bash
+    groups: [adm, cdrom, dip, lxd, sudo]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${PUB_LINE}
 EOF
 
 cloud-localds "${SEED_ISO}" "${USER_DATA}" "${META_DATA}"
@@ -211,26 +237,8 @@ wait_for_apt() {
     sleep 2
   done
 }
-
-export PATH="$HOME/.local/bin:$PATH"
 wait_for_apt
-
-sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  build-essential clang libbpf-dev bpfcc-tools python3-bpfcc \
-  git make perl curl ca-certificates linux-tools-common >/dev/null
-if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  "linux-headers-$(uname -r)" "linux-tools-$(uname -r)" >/dev/null; then
-  echo "[guest] kernel-specific headers/tools unavailable; trying generic packages" >&2
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    linux-headers-generic linux-tools-generic >/dev/null
-fi
-sudo apt-get clean
-
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-fi
+export PATH="$HOME/.local/bin:$PATH"
 
 sudo modprobe 9pnet_virtio 2>/dev/null || true
 sudo mkdir -p /mnt/reflex
@@ -239,6 +247,12 @@ if ! mountpoint -q /mnt/reflex; then
 fi
 
 cd /mnt/reflex
+for dep in uv make clang git; do
+  if ! command -v "${dep}" >/dev/null 2>&1; then
+    echo "error: missing required dependency '${dep}' in guest image" >&2
+    exit 1
+  fi
+done
 uv venv --system-site-packages --allow-existing
 uv sync
 BPFTOOL_BIN="$(command -v bpftool || true)"
@@ -258,7 +272,7 @@ if [[ ! -x "${UNIXBENCH_DIR}/UnixBench/Run" ]]; then
   git clone --depth 1 "${UNIXBENCH_URL}" "${UNIXBENCH_DIR}"
 fi
 
-UNIXBENCH="${UNIXBENCH_DIR}/UnixBench/Run" MODES="${MODES}" bash benchmarks/unixbench_compare.sh
+UNIXBENCH="${UNIXBENCH_DIR}/UnixBench/Run" MODES="${MODES}" REFLEX_RESET_BETWEEN_BENCH=1 bash benchmarks/unixbench_compare.sh
 GUEST
 
 echo "[unixbench-qemu] complete"

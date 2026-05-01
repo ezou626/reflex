@@ -146,8 +146,32 @@ kernel_sched_cfs_bandwidth_slice_us = _sysctl(
     "sysctl_kernel_sched_cfs_bandwidth_slice_us",
     "kernel.sched_cfs_bandwidth_slice_us",
     "cpu",
-    "CFS scheduling time-slice length; smaller reduces latency, larger improves throughput",
+    "Cgroup CPU quota slice transfer size; larger reduces accounting overhead while smaller allows finer-grained quota consumption",
     min_value=1000, max_value=100000, step=1000,
+)
+
+kernel_sched_min_granularity_ns = _sysctl(
+    "sysctl_kernel_sched_min_granularity_ns",
+    "kernel.sched_min_granularity_ns",
+    "cpu",
+    "Minimum CFS runtime slice per runnable task; higher reduces context-switch overhead for CPU-bound batch workloads, lower improves latency/fairness",
+    min_value=750000, max_value=20000000, step=750000,
+)
+
+kernel_sched_latency_ns = _sysctl(
+    "sysctl_kernel_sched_latency_ns",
+    "kernel.sched_latency_ns",
+    "cpu",
+    "Target CFS period over which runnable tasks share CPU; higher favors throughput, lower favors responsiveness",
+    min_value=6000000, max_value=48000000, step=3000000,
+)
+
+kernel_sched_wakeup_granularity_ns = _sysctl(
+    "sysctl_kernel_sched_wakeup_granularity_ns",
+    "kernel.sched_wakeup_granularity_ns",
+    "cpu",
+    "How much advantage a waking task needs to preempt current task; higher reduces preemption churn, lower improves interactive latency",
+    min_value=1000000, max_value=24000000, step=1000000,
 )
 
 kernel_sched_autogroup_enabled = _sysctl(
@@ -156,7 +180,7 @@ kernel_sched_autogroup_enabled = _sysctl(
     "cpu",
     "Group tasks by session for fairer scheduling; off favours batch throughput",
     min_value=0, max_value=1, step=1,
-    enabled=False,
+    enabled=True,
 )
 
 # net
@@ -268,6 +292,9 @@ ALL_TUNERS: tuple[GenericSysctlTuner, ...] = (
     vm_overcommit_memory,
     vm_overcommit_kbytes,
     kernel_sched_cfs_bandwidth_slice_us,
+    kernel_sched_min_granularity_ns,
+    kernel_sched_latency_ns,
+    kernel_sched_wakeup_granularity_ns,
     kernel_sched_autogroup_enabled,
     net_core_somaxconn,
     net_core_netdev_max_backlog,

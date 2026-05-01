@@ -14,9 +14,13 @@ into separate positional arguments and cause parameter binding errors.
 
 Useful parameters:
   -Modes "workload_only,heuristic"   (quoted, comma-separated)
+  -Targeted                          run only eBPF-sensitive tests: pipe, context1, syscall, spawn, fsbuffer
+  -Full                              run full UnixBench suite (-i 3); default is fast (-i 1 dhry2reg whetstone-double)
+  -DryRunOnly                        run non-workload modes in dry-run only (no live tuning runs)
+  -DryRun                            run each mode twice: once live, once with --dry-run
   -SshPort 52223
   -DiskGB 32
-    -OpenAIApiKey "<key>"              (optional; defaults to host OPENAI_API_KEY or .env)
+  -OpenAIApiKey "<key>"              (optional; defaults to host OPENAI_API_KEY or .env)
 #>
 
 [CmdletBinding()]
@@ -32,7 +36,9 @@ param(
     [string]$UnixBenchUrl = "https://github.com/kdlucas/byte-unixbench.git",
     [switch]$KeepVm,
     [switch]$Full,
-    [switch]$DryRun
+    [switch]$Targeted,
+    [switch]$DryRun,
+    [switch]$DryRunOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -55,6 +61,15 @@ function Resolve-CommandPath {
         }
     }
     return $null
+}
+
+function Reset-HostKeyForPort {
+    param([int]$Port)
+    $knownHosts = Join-Path $env:USERPROFILE ".ssh\known_hosts"
+    if (-not (Test-Path $knownHosts)) {
+        return
+    }
+    & ssh-keygen -R "[127.0.0.1]:$Port" -f $knownHosts | Out-Null
 }
 
 function Get-DotEnvValue {
@@ -125,16 +140,19 @@ function Wait-ForSsh {
         [int]$Port
     )
     for ($i = 0; $i -lt 120; $i++) {
-        $ErrorActionPreference = "SilentlyContinue"
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $out = & ssh -vv `
+            -F NUL `
             -i $KeyPath `
             -p $Port `
+            -o IdentitiesOnly=yes `
             -o StrictHostKeyChecking=accept-new `
             -o UserKnownHostsFile="$KnownHosts" `
             -o ConnectTimeout=5 `
             -o BatchMode=yes `
             ubuntu@127.0.0.1 "echo ok" 2>&1
-        $ErrorActionPreference = "Stop"
+        $ErrorActionPreference = $prevEap
         if ($LASTEXITCODE -eq 0) {
             Write-Step "SSH ready"
             return
@@ -151,6 +169,8 @@ function Wait-ForSsh {
 function Invoke-Guest {
     param([string]$Command)
     & ssh -i $Key -p $SshPort `
+        -F NUL `
+        -o IdentitiesOnly=yes ` `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
         -o ConnectTimeout=30 `
@@ -195,7 +215,7 @@ if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) {
     throw "ssh-keygen not found. Install OpenSSH Client."
 }
 
-$baseImg = Join-Path $CacheDir "noble-server-cloudimg-amd64.img"
+$baseImg = Join-Path $CacheDir "noble-unixbench-deps-amd64.img"
 $overlay = Join-Path $CacheDir "unixbench-overlay-$PID.qcow2"
 $seedIso = Join-Path $CacheDir "unixbench-seed-$PID.iso"
 $seedDir = Join-Path $CacheDir "seed-$PID"
@@ -207,20 +227,33 @@ $KnownHosts = Join-Path $CacheDir "known_hosts.unixbench.$PID"
 $repoTar = Join-Path $CacheDir "reflex-$PID.tar.gz"
 $runRootFile = Join-Path $CacheDir "unixbench-run-root-$PID.txt"
 
-if (-not (Test-Path $Key)) {
-    Write-Step "Generating SSH key: $Key"
-    & ssh-keygen -t ed25519 -f $Key -N "" -q
-    if ($LASTEXITCODE -ne 0) {
-        throw "ssh-keygen failed"
-    }
+Reset-HostKeyForPort -Port $SshPort
+
+Write-Step "Generating SSH key: $Key"
+Remove-Item -Force $Key, $pub -ErrorAction SilentlyContinue
+& ssh-keygen -t ed25519 -f $Key -N '""' -q
+if ($LASTEXITCODE -ne 0) {
+    throw "ssh-keygen failed"
 }
 # Windows OpenSSH refuses to sign with world-readable private keys
 icacls $Key /inheritance:r /grant:r "${env:USERNAME}:F" | Out-Null
 
 if (-not (Test-Path $baseImg)) {
-    Write-Step "Downloading Ubuntu cloud image"
-    Invoke-WebRequest -Uri $UbuntuImageUrl -OutFile "$baseImg.part"
-    Move-Item -Force "$baseImg.part" $baseImg
+    $bakeScript = Join-Path $PSScriptRoot "bake_unixbench_image.ps1"
+    if (Test-Path $bakeScript) {
+        Write-Step "Prebaked image missing; building via bake_unixbench_image.ps1"
+        $bakePort = $SshPort + 100
+        if ($bakePort -gt 65535) { $bakePort = 52223 }
+        & powershell -ExecutionPolicy Bypass -File $bakeScript -CacheDir $CacheDir -SourceImageUrl $UbuntuImageUrl -OutputImageName "noble-unixbench-deps-amd64.img" -SshPort $bakePort -MemoryMB $MemoryMB -Cpus $Cpus
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to bake image via $bakeScript"
+        }
+    } else {
+        throw "Prebaked image missing and bake script not found: $bakeScript"
+    }
+    if (-not (Test-Path $baseImg)) {
+        throw "Expected prebaked image not found after bake: $baseImg"
+    }
 }
 
 Write-Step "Creating cloud-init seed ISO"
@@ -275,6 +308,11 @@ if ($mkisofs) {
     throw "No ISO creation tool found. Install mkisofs/genisoimage/xorriso/oscdimg, or enable WSL with genisoimage."
 }
 
+if (Get-Command wsl.exe -ErrorAction SilentlyContinue) {
+    Write-Step "Shutting down WSL before starting QEMU"
+    wsl --shutdown | Out-Null
+}
+
 Write-Step "Creating VM overlay"
 & $qemuImg create -f qcow2 -F qcow2 -b (Resolve-Path $baseImg) $overlay | Out-Host
 & $qemuImg resize $overlay "${DiskGB}G" | Out-Host
@@ -313,17 +351,32 @@ $qemuProc.ProcessorAffinity = [IntPtr]0xFF  # P-cores; adjust mask as needed
 try {
     New-Item -ItemType File -Force -Path $KnownHosts | Out-Null
     Write-Step "Waiting for SSH"
-    Wait-ForSsh -KeyPath $Key -Port $SshPort
+    try {
+        Wait-ForSsh -KeyPath $Key -Port $SshPort
+    } catch {
+        Write-Step "SSH did not become ready; dumping recent VM logs"
+        if (Test-Path $consoleLog) {
+            Write-Host "---- console log (last 80 lines) ----"
+            Get-Content $consoleLog -Tail 80 | ForEach-Object { Write-Host $_ }
+        }
+        if (Test-Path $qemuLog) {
+            Write-Host "---- qemu stderr log (last 80 lines) ----"
+            Get-Content $qemuLog -Tail 80 | ForEach-Object { Write-Host $_ }
+        }
+        throw
+    }
 
     Write-Step "Preparing repo archive"
     if (Test-Path $repoTar) { Remove-Item -Force $repoTar }
     $wslRoot = (wsl wslpath -u ($repoRoot.ToString().Replace('\', '/'))).Trim()
     $wslTar  = (wsl wslpath -u ($repoTar.Replace('\', '/'))).Trim()
-    wsl bash -c "cd '$wslRoot' && tar -czf '$wslTar' --exclude='./.git' --exclude='./.venv' --exclude='./data/qemu-windows' --exclude='./data/qemu' --exclude='./__pycache__' --exclude='./.worktrees' ."
+    wsl bash -c "cd '$wslRoot' && tar -czf '$wslTar' --exclude='./.git' --exclude='./.venv' --exclude='./.uv-cache' --exclude='./.pytest_cache' --exclude='./.ruff_cache' --exclude='./.mypy_cache' --exclude='./.cache' --exclude='./data/qemu-windows' --exclude='./data/qemu' --exclude='./__pycache__' --exclude='./.worktrees' ."
     if ($LASTEXITCODE -ne 0) { throw "repo tar creation failed" }
 
     Write-Step "Copying repo archive to guest"
     & scp -i $Key -P $SshPort `
+        -F NUL `
+        -o IdentitiesOnly=yes ` `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
         $repoTar ubuntu@127.0.0.1:/home/ubuntu/reflex.tar.gz
@@ -408,8 +461,8 @@ RUN_ROOT="/home/ubuntu/reflex/data/runs/unixbench-$(date +%Y%m%d-%H%M%S)"
 UNIXBENCH="$UNIXBENCH_DIR/UnixBench/Run" RUN_ROOT="$RUN_ROOT" bash benchmarks/unixbench_compare.sh --modes "__MODES__" __SUITE__ __DRYRUN__
 printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
 '@
-    $suiteArg  = if ($Full)   { "--full" }    else { "--fast" }
-    $dryRunArg = if ($DryRun) { "--dry-run" } else { "" }
+    $suiteArg  = if ($Targeted) { "--targeted" } elseif ($Full) { "--full" } else { "--fast" }
+    $dryRunArg = if ($DryRunOnly) { "--dry-run-only" } elseif ($DryRun) { "--dry-run" } else { "" }
     $guestScript = $guestScript.Replace("__UNIXBENCH_URL__", $UnixBenchUrl).Replace("__MODES__", $Modes).Replace("__SUITE__", $suiteArg).Replace("__DRYRUN__", $dryRunArg).Replace("__OPENAI_API_KEY_EXPORT__", $openAiExportLine)
     $guestScript = $guestScript -replace "`r", ""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guestScript))
@@ -417,6 +470,8 @@ printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
 
     Write-Step "Copying results back to Windows host"
     & scp -r -i $Key -P $SshPort `
+        -F NUL `
+        -o IdentitiesOnly=yes ` `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
         ubuntu@127.0.0.1:/home/ubuntu/reflex/data/last_unixbench_run_root.txt `
@@ -432,6 +487,8 @@ printf '%s\n' "$RUN_ROOT" > /home/ubuntu/reflex/data/last_unixbench_run_root.txt
     $runName = Split-Path -Leaf $guestRunRoot
 
     & scp -r -i $Key -P $SshPort `
+        -F NUL `
+        -o IdentitiesOnly=yes ` `
         -o StrictHostKeyChecking=yes `
         -o UserKnownHostsFile="$KnownHosts" `
         "ubuntu@127.0.0.1:$guestRunRoot" `

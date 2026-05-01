@@ -412,7 +412,7 @@ make -C src/reflex/implementations/ebpf BPFTOOL="$BPFTOOL_BIN"
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 DAEMON_LOG="/home/ubuntu/reflex/daemon.log"
 DAEMON_PIDFILE="/home/ubuntu/reflex/daemon.pid"
-nohup sudo env OPENAI_API_KEY="$OPENAI_API_KEY" uv run -- python -m reflex.implementations.main --no-sudo __DRYRUN__ __DAEMON__ > "$DAEMON_LOG" 2>&1 &
+nohup sudo env OPENAI_API_KEY="$OPENAI_API_KEY" uv run reflex --no-sudo __DRYRUN__ __DAEMON__ > "$DAEMON_LOG" 2>&1 &
 echo $! > "$DAEMON_PIDFILE"
 printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DAEMON_PIDFILE" > /home/ubuntu/reflex/daemon_started.txt
 '@

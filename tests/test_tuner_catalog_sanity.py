@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import pytest
-
 from reflex.core.tuners.catalog import ALL_TUNERS
 
 
@@ -15,12 +13,3 @@ def test_tuner_catalog_loads() -> None:
         sysctl = entry.sysctl
         assert sysctl and ".." not in sysctl and not sysctl.startswith("/")
 
-
-@pytest.mark.skip(reason="parse_proc_cmdline and boot_cmdline tuner support removed in src/ restructure")
-def test_tuner_constructors() -> None:
-    pass
-
-
-@pytest.mark.skip(reason="TuningPolicy / select_actions removed in src/ restructure; see reflex.core")
-def test_select_actions_top_n() -> None:
-    pass

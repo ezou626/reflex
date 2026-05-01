@@ -62,6 +62,16 @@ class ControllerRunContext(Protocol):
     ) -> DaemonEvent:
         ...
 
+    async def record_execution_result(
+        self,
+        *,
+        ok: bool,
+        payload: Any = None,
+        error: str | None = None,
+        action_records: list[Any] | None = None,
+    ) -> ExecutionResult:
+        ...
+
     def executor_queue_size(self) -> int:
         ...
 

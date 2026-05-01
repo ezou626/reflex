@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,6 +11,15 @@ from reflex.core.types import Aggregator, Controller
 RuntimeHook = Callable[[Any], Awaitable[None]]
 ErrorHook = Callable[[Any, BaseException], Awaitable[None]]
 TriggerFactory = Callable[[Any], Awaitable[None]]
+
+
+def interval_trigger(interval_sec: float, reason: str = "interval_timer") -> TriggerFactory:
+    """Return a trigger that fires runtime.trigger_controller every interval_sec seconds."""
+    async def _trigger(runtime: Any) -> None:
+        while True:
+            await asyncio.sleep(interval_sec)
+            await runtime.trigger_controller(reason)
+    return _trigger
 
 
 @dataclass(frozen=True)

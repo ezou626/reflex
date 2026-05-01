@@ -1,49 +1,74 @@
-// #include <linux/bpf.h>
-// #include <linux/version.h>
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
-
-/* Struct to store event */
-
-
-/* Code snippet adopted in part from falco.org */
-/* This version will send data to userspace using a ringbuf */
 
 volatile const __u32 python_pid = 0;
 volatile const __u32 loader_pid = 0;
 volatile const __u8  use_cgroup_filter = 0;
+volatile const __u32 syscall_sample_rate = 4;
+volatile const __u32 sched_switch_sample_rate = 4;
+volatile const __u32 rq_sample_rate = 4;
 
+#define LAT_BUCKETS 32
 
-/* Unified event payload — layout is naturally 48 bytes, no padding needed.
- * value_i32/value_u32 are event-specific (see event type constants below).
- * Matches the userspace loader payload decoder. */
-#define EVENT_EXEC           1
-#define EVENT_FORK           2
-#define EVENT_EXIT           3
-#define EVENT_SCHED_SWITCH   4
-#define EVENT_SYSCALL_EXIT   5
-#define EVENT_RQ_LATENCY     6
-#define EVENT_DIRECT_RECLAIM 7  /* vmscan: process stalled for memory reclaim */
-#define EVENT_BLK_LATENCY    8  /* block: I/O request completion latency */
-
-struct payload {
-    __u32 event_type;
-    __u32 cpu;
-    __u32 pid;
-    __u32 tgid;     // thread id (kernel naming: tgid=process, pid=thread)
-    __u64 ts_ns;
-    __s32 value_i32; // event-specific: fork=parent_pid, switch=prev_pid, syscall=ret
-    __u32 value_u32; // event-specific: fork=child_pid, switch=next_pid, syscall=id, rq=lat_us
-    char  comm[16];
+/*
+ * Kernel-side window aggregate.
+ *
+ * Scope notes:
+ * - syscall counters/latency honor the cgroup whitelist when enabled.
+ * - scheduler, block, and reclaim signals remain system-wide, matching the
+ *   previous ring-buffer behavior, except for existing self-PID exclusions.
+ * - latency histograms are log2 microsecond buckets; userspace reports p95 as
+ *   the selected bucket's upper bound.
+ */
+struct aggregate {
+    __u64 syscall_count;
+    __u64 syscall_failure_count;
+    __u64 syscall_latency_count;
+    __u64 rq_latency_count;
+    __u64 blk_latency_count;
+    __u64 direct_reclaim_count;
+    __u64 fork_count;
+    __u64 ctx_switch_count;
+    __u64 syscall_latency_hist[LAT_BUCKETS];
+    __u64 rq_latency_hist[LAT_BUCKETS];
+    __u64 blk_latency_hist[LAT_BUCKETS];
+    __u64 direct_reclaim_latency_hist[LAT_BUCKETS];
 };
 
-/* temporary storage hashmap for enter */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct aggregate);
+} window_agg SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} syscall_stride SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} sched_switch_stride SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} rq_stride SEC(".maps");
+
+/* temporary storage hashmap for syscall enter timestamps, keyed by thread id */
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 10240);
-  __type(key, u32); // keyed by thread id (single thread waits for syscall execution)
-  __type(value, u64); // val start timestamp (stored)
+  __type(key, u32);
+  __type(value, u64);
 } enter_parking SEC(".maps");
 
 /* wakeup timestamp storage for rq latency, keyed by pid */
@@ -70,87 +95,115 @@ struct {
   __type(value, u64);
 } blk_issue_ts SEC(".maps");
 
-/* per-cpu sched_switch counter — emit one EVENT_SCHED_SWITCH per SW_BATCH switches */
-#define SW_BATCH 100
-struct {
-  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-  __uint(max_entries, 1);
-  __type(key, __u32);
-  __type(value, __u64);
-} sw_counter SEC(".maps");
-
 struct {
   __uint(type, BPF_MAP_TYPE_HASH);
   __uint(max_entries, 256);
-  __type(key, u64);   // cgroup id
-  __type(value, u8);  // presence flag
-} cgroup_whitelist SEC(".maps"); // for passing the programs to track to kernel side
+  __type(key, u64);
+  __type(value, u8);
+} cgroup_whitelist SEC(".maps");
 
+static __always_inline struct aggregate *current_agg(void)
+{
+    __u32 key = 0;
+    return bpf_map_lookup_elem(&window_agg, &key);
+}
 
-struct{
-    __uint(type, BPF_MAP_TYPE_RINGBUF); // macro to initialize pointer with specific size to pass info
-    __uint(max_entries, 256 * 1024);
-} events SEC(".maps"); // Basically puts in the map section of .o
-    // for the loader library (libbpf) to use
+static __always_inline __u32 latency_bucket(__u64 lat_us)
+{
+    if (lat_us <= 1)
+        return 0;
 
-// tp and tracepoint are interchangable
-// see tps.txt for full list, but if you are using RAW tracepoints theres just enter and exit
+    __u64 value = lat_us - 1;
+    __u32 bucket = 1;
+    if (value >= (1ULL << 16)) {
+        value >>= 16;
+        bucket += 16;
+    }
+    if (value >= (1ULL << 8)) {
+        value >>= 8;
+        bucket += 8;
+    }
+    if (value >= (1ULL << 4)) {
+        value >>= 4;
+        bucket += 4;
+    }
+    if (value >= (1ULL << 2)) {
+        value >>= 2;
+        bucket += 2;
+    }
+    if (value >= (1ULL << 1))
+        bucket += 1;
 
-// SEC("raw_tp/sys_enter")
-// this is the true raw version which handles the registers ^^
+    if (bucket >= LAT_BUCKETS)
+        return LAT_BUCKETS - 1;
+    return bucket;
+}
 
+static __always_inline void add_latency(__u64 *hist, __u64 lat_us)
+{
+    __u32 bucket = latency_bucket(lat_us);
+    hist[bucket]++;
+}
 
-/* alloc and fill common fields for sched/process events.
- * no cgroup filter here — these are system-wide scheduler metrics. */
-static __always_inline struct payload *alloc_sched_event(__u32 type) {
+static __always_inline int skip_self(void)
+{
     __u64 ptg = bpf_get_current_pid_tgid();
     __u32 pid = ptg >> 32;
-    if (pid == python_pid || pid == loader_pid)
-        return NULL;
+    return pid == python_pid || pid == loader_pid;
+}
 
-    struct payload *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        return NULL;
+static __always_inline __u32 normalized_rate(__u32 rate)
+{
+    return rate == 0 ? 1 : rate;
+}
 
-    e->event_type = type;
-    e->cpu        = bpf_get_smp_processor_id();
-    e->pid        = pid;
-    e->tgid       = (__u32)ptg;
-    e->ts_ns      = bpf_ktime_get_ns();
-    e->value_i32  = 0;
-    e->value_u32  = 0;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    return e;
+static __always_inline int stride_sample(void *stride_map, __u32 rate)
+{
+    __u32 key = 0;
+    __u64 *counter = bpf_map_lookup_elem(stride_map, &key);
+    if (!counter)
+        return true;
+
+    __u32 stride = normalized_rate(rate);
+    __u64 next = *counter + 1;
+    if (next >= stride) {
+        *counter = 0;
+        return 1;
+    }
+    *counter = next;
+    return 0;
 }
 
 SEC("tp/sched/sched_process_exec")
-int handle_exec(struct trace_event_raw_sched_process_exec *ctx) {
-    struct payload *e = alloc_sched_event(EVENT_EXEC);
-    if (e) bpf_ringbuf_submit(e, 0);
+int handle_exec(struct trace_event_raw_sched_process_exec *ctx)
+{
     return 0;
 }
 
 SEC("tp/sched/sched_process_fork")
-int handle_fork(struct trace_event_raw_sched_process_fork *ctx) {
-    struct payload *e = alloc_sched_event(EVENT_FORK);
-    if (e) {
-        e->value_i32 = ctx->parent_pid;
-        e->value_u32 = ctx->child_pid;
-        bpf_ringbuf_submit(e, 0);
-    }
+int handle_fork(struct trace_event_raw_sched_process_fork *ctx)
+{
+    if (skip_self())
+        return 0;
+
+    struct aggregate *agg = current_agg();
+    if (agg)
+        agg->fork_count++;
     return 0;
 }
 
 SEC("tp/sched/sched_process_exit")
-int handle_exit(struct trace_event_raw_sched_process_template *ctx) {
-    struct payload *e = alloc_sched_event(EVENT_EXIT);
-    if (e) bpf_ringbuf_submit(e, 0);
+int handle_exit(struct trace_event_raw_sched_process_template *ctx)
+{
     return 0;
 }
 
-/* record wakeup timestamp for rq latency calculation */
 SEC("tp/sched/sched_wakeup")
-int handle_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
+int handle_wakeup(struct trace_event_raw_sched_wakeup_template *ctx)
+{
+    if (!stride_sample(&rq_stride, rq_sample_rate))
+        return 0;
+
     __u32 pid = ctx->pid;
     __u64 ts  = bpf_ktime_get_ns();
     bpf_map_update_elem(&wakeup_ts, &pid, &ts, BPF_ANY);
@@ -158,192 +211,140 @@ int handle_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
 }
 
 SEC("tp/sched/sched_switch")
-int handle_sched_switch(struct trace_event_raw_sched_switch *ctx) {
-    /* batch-emit context switch count — one EVENT_SCHED_SWITCH per SW_BATCH switches.
-     * value_u32 carries the batch size so the aggregator can reconstruct the true rate. */
-    __u32 key = 0;
-    __u64 *cnt = bpf_map_lookup_elem(&sw_counter, &key);
-    if (cnt) {
-        (*cnt)++;
-        if (*cnt >= SW_BATCH) {
-            struct payload *sw = bpf_ringbuf_reserve(&events, sizeof(*sw), 0);
-            if (sw) {
-                sw->event_type = EVENT_SCHED_SWITCH;
-                sw->cpu        = bpf_get_smp_processor_id();
-                sw->pid        = 0;
-                sw->tgid       = 0;
-                sw->ts_ns      = bpf_ktime_get_ns();
-                sw->value_i32  = 0;
-                sw->value_u32  = SW_BATCH;
-                sw->comm[0]    = '\0';
-                bpf_ringbuf_submit(sw, 0);
-            }
-            *cnt = 0;
-        }
+int handle_sched_switch(struct trace_event_raw_sched_switch *ctx)
+{
+    struct aggregate *agg = current_agg();
+    if (agg && stride_sample(&sched_switch_stride, sched_switch_sample_rate)) {
+        __u32 switch_rate = normalized_rate(sched_switch_sample_rate);
+        agg->ctx_switch_count += switch_rate;
     }
 
-    /* compute wakeup->oncpu latency for the task being switched in */
     __u32 next_pid = ctx->next_pid;
     __u64 *start = bpf_map_lookup_elem(&wakeup_ts, &next_pid);
     if (start) {
         __u64 now = bpf_ktime_get_ns();
-        __u32 lat_us = (__u32)((now - *start) / 1000);
-        if (lat_us >= 100) { // drop sub-100us wakeups, only emit meaningful delays
-            struct payload *lat = bpf_ringbuf_reserve(&events, sizeof(*lat), 0);
-            if (lat) {
-                lat->event_type = EVENT_RQ_LATENCY;
-                lat->cpu        = bpf_get_smp_processor_id();
-                lat->pid        = next_pid;
-                lat->tgid       = 0;
-                lat->ts_ns      = now;
-                lat->value_i32  = 0;
-                lat->value_u32  = lat_us;
-                bpf_get_current_comm(&lat->comm, sizeof(lat->comm));
-                bpf_ringbuf_submit(lat, 0);
-            }
+        __u64 lat_us = (now - *start) / 1000;
+        __u32 rq_rate = normalized_rate(rq_sample_rate);
+        if (lat_us >= 100 && agg) {
+            agg->rq_latency_count += rq_rate;
+            add_latency(agg->rq_latency_hist, lat_us);
         }
         bpf_map_delete_elem(&wakeup_ts, &next_pid);
     }
     return 0;
 }
 
-
 SEC("tp/raw_syscalls/sys_enter")
-int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx) {
-  __u64 ptg = bpf_get_current_pid_tgid();
-  __u32 tid = (__u32)ptg;
-  __u32 pid = ptg >> 32;
-
-  if (pid == python_pid || pid == loader_pid) {
-    return 0; // drop / exit early if its catching the program itself
-  }
-
-  /* here is where filtering only on benchmarked programs is added (this is for )*/
-
-  if (use_cgroup_filter) {
-    __u64 cgid = bpf_get_current_cgroup_id();
-    u8 *allowed = bpf_map_lookup_elem(&cgroup_whitelist, &cgid);
-    if (!allowed) return 0;  // not whitelisted, drop
-  }
-
-  __u64 ts = bpf_ktime_get_ns();
-  bpf_map_update_elem(&enter_parking, &tid, &ts, BPF_ANY);
-  return 0;
-
-  /* no longer sending return vals to user space for enter */
-  //   #pragma unroll
-  // for (int i = 0; i < 6; i++) {
-  //   evt->args[i] = ctx->args[i];
-  // }
-  // bpf_ringbuf_submit(evt, 0);
-  // return 0;
-}
-
-
-
-// now the exit so we can look at syscall latency
-
-SEC("tp/raw_syscalls/sys_exit")
-int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx) {
-  // need to reserve some space first
-
-  __u64 ptg = bpf_get_current_pid_tgid();
-  __u32 tid = (__u32)ptg;
-
-  __u64 *start_ts = bpf_map_lookup_elem(&enter_parking, &tid);
-  if (!start_ts) return 0; // skip if no entry
-
-  struct payload *pl = bpf_ringbuf_reserve(&events, sizeof(*pl), 0);
-  if (pl) {
-    pl->event_type = EVENT_SYSCALL_EXIT;
-    pl->cpu        = bpf_get_smp_processor_id();
-    pl->pid        = (__u32)(ptg >> 32);
-    pl->tgid       = tid;
-    pl->ts_ns      = bpf_ktime_get_ns();
-    pl->value_u32  = (__u32)ctx->id;
-    pl->value_i32  = (__s32)ctx->ret;
-    bpf_get_current_comm(&pl->comm, sizeof(pl->comm));
-
-    bpf_ringbuf_submit(pl, 0);
-  }
-  bpf_map_delete_elem(&enter_parking, &tid);
-  return 0;
-}
-
-// tp/raw_syscalls/sys_enter is a standard tracepoint not a raw tracepoint
-
-/* Record when a process enters direct reclaim (memory pressure stall). */
-SEC("tp/vmscan/mm_vmscan_direct_reclaim_begin")
-int handle_reclaim_begin(struct trace_event_raw_mm_vmscan_direct_reclaim_begin_template *ctx) {
+int detect_syscall_enter(struct trace_event_raw_sys_enter *ctx)
+{
     __u64 ptg = bpf_get_current_pid_tgid();
+    __u32 tid = (__u32)ptg;
     __u32 pid = ptg >> 32;
+
     if (pid == python_pid || pid == loader_pid)
         return 0;
+
+    if (use_cgroup_filter) {
+        __u64 cgid = bpf_get_current_cgroup_id();
+        u8 *allowed = bpf_map_lookup_elem(&cgroup_whitelist, &cgid);
+        if (!allowed)
+            return 0;
+    }
+
+    if (!stride_sample(&syscall_stride, syscall_sample_rate))
+        return 0;
+
+    __u64 ts = bpf_ktime_get_ns();
+    bpf_map_update_elem(&enter_parking, &tid, &ts, BPF_ANY);
+    return 0;
+}
+
+SEC("tp/raw_syscalls/sys_exit")
+int detect_syscall_exit(struct trace_event_raw_sys_exit *ctx)
+{
+    __u64 ptg = bpf_get_current_pid_tgid();
+    __u32 tid = (__u32)ptg;
+
+    __u64 *start_ts = bpf_map_lookup_elem(&enter_parking, &tid);
+    if (!start_ts)
+        return 0;
+
+    struct aggregate *agg = current_agg();
+    if (agg) {
+        __u64 now = bpf_ktime_get_ns();
+        __u64 lat_us = (now - *start_ts) / 1000;
+        __u32 rate = normalized_rate(syscall_sample_rate);
+        agg->syscall_count += rate;
+        agg->syscall_latency_count += rate;
+        if (ctx->ret < 0)
+            agg->syscall_failure_count += rate;
+        add_latency(agg->syscall_latency_hist, lat_us);
+    }
+
+    bpf_map_delete_elem(&enter_parking, &tid);
+    return 0;
+}
+
+SEC("tp/vmscan/mm_vmscan_direct_reclaim_begin")
+int handle_reclaim_begin(struct trace_event_raw_mm_vmscan_direct_reclaim_begin_template *ctx)
+{
+    if (skip_self())
+        return 0;
+
+    __u64 ptg = bpf_get_current_pid_tgid();
+    __u32 pid = ptg >> 32;
     __u64 ts = bpf_ktime_get_ns();
     bpf_map_update_elem(&reclaim_ts, &pid, &ts, BPF_ANY);
     return 0;
 }
 
-/* Compute direct reclaim duration and emit EVENT_DIRECT_RECLAIM.
- * value_u32 = stall duration in microseconds.
- * High rate or high latency here = severe memory pressure. */
 SEC("tp/vmscan/mm_vmscan_direct_reclaim_end")
-int handle_reclaim_end(struct trace_event_raw_mm_vmscan_direct_reclaim_end_template *ctx) {
+int handle_reclaim_end(struct trace_event_raw_mm_vmscan_direct_reclaim_end_template *ctx)
+{
     __u64 ptg = bpf_get_current_pid_tgid();
     __u32 pid = ptg >> 32;
     __u64 *start = bpf_map_lookup_elem(&reclaim_ts, &pid);
-    if (!start) return 0;
+    if (!start)
+        return 0;
 
     __u64 now = bpf_ktime_get_ns();
-    __u32 lat_us = (__u32)((now - *start) / 1000);
+    __u64 lat_us = (now - *start) / 1000;
     bpf_map_delete_elem(&reclaim_ts, &pid);
 
-    struct payload *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e) return 0;
-    e->event_type = EVENT_DIRECT_RECLAIM;
-    e->cpu        = bpf_get_smp_processor_id();
-    e->pid        = pid;
-    e->tgid       = (__u32)ptg;
-    e->ts_ns      = now;
-    e->value_i32  = 0;
-    e->value_u32  = lat_us;
-    bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    bpf_ringbuf_submit(e, 0);
+    struct aggregate *agg = current_agg();
+    if (agg) {
+        agg->direct_reclaim_count++;
+        add_latency(agg->direct_reclaim_latency_hist, lat_us);
+    }
     return 0;
 }
 
-/* Record block I/O issue timestamp. Key = (dev << 32) | sector. */
 SEC("tp/block/block_rq_issue")
-int handle_blk_issue(struct trace_event_raw_block_rq *ctx) {
+int handle_blk_issue(struct trace_event_raw_block_rq *ctx)
+{
     __u64 key = ((__u64)ctx->dev << 32) | ((__u64)ctx->sector & 0xFFFFFFFF);
     __u64 ts  = bpf_ktime_get_ns();
     bpf_map_update_elem(&blk_issue_ts, &key, &ts, BPF_ANY);
     return 0;
 }
 
-/* Compute block I/O completion latency and emit EVENT_BLK_LATENCY.
- * value_u32 = latency in microseconds. */
 SEC("tp/block/block_rq_complete")
-int handle_blk_complete(struct trace_event_raw_block_rq_completion *ctx) {
-    __u64 key   = ((__u64)ctx->dev << 32) | ((__u64)ctx->sector & 0xFFFFFFFF);
+int handle_blk_complete(struct trace_event_raw_block_rq_completion *ctx)
+{
+    __u64 key = ((__u64)ctx->dev << 32) | ((__u64)ctx->sector & 0xFFFFFFFF);
     __u64 *start = bpf_map_lookup_elem(&blk_issue_ts, &key);
-    if (!start) return 0;
+    if (!start)
+        return 0;
 
-    __u64 now    = bpf_ktime_get_ns();
-    __u32 lat_us = (__u32)((now - *start) / 1000);
+    __u64 now = bpf_ktime_get_ns();
+    __u64 lat_us = (now - *start) / 1000;
     bpf_map_delete_elem(&blk_issue_ts, &key);
 
-    struct payload *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e) return 0;
-    e->event_type = EVENT_BLK_LATENCY;
-    e->cpu        = bpf_get_smp_processor_id();
-    e->pid        = 0;
-    e->tgid       = 0;
-    e->ts_ns      = now;
-    e->value_i32  = 0;
-    e->value_u32  = lat_us;
-    e->comm[0]    = '\0';
-    bpf_ringbuf_submit(e, 0);
+    struct aggregate *agg = current_agg();
+    if (agg) {
+        agg->blk_latency_count++;
+        add_latency(agg->blk_latency_hist, lat_us);
+    }
     return 0;
 }
 

@@ -19,6 +19,7 @@ def _summary_bytes(
     rq_latency_count: int = 8,
     syscall_count: int = 100,
     failure_count: int = 5,
+    syscall_p95_us: int = 23,
     blk_p95_us: int = 67,
     blk_latency_count: int = 9,
     ctx_switch_count: int = 300,
@@ -33,6 +34,7 @@ def _summary_bytes(
         rq_latency_count,
         syscall_count,
         failure_count,
+        syscall_p95_us,
         blk_p95_us,
         blk_latency_count,
         ctx_switch_count,
@@ -43,7 +45,11 @@ def _summary_bytes(
 
 
 def test_decode_summary_matches_controller_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(window_summary, "_host_features", lambda: {"host_dirty_kb": 10})
+    monkeypatch.setattr(
+        window_summary,
+        "_host_features",
+        lambda _prev=None: ({"host_dirty_kb": 10}, _prev),
+    )
 
     summary = decode_summary(_summary_bytes(), window_sec=2.0, received_ts=1000.0)
 
@@ -57,6 +63,8 @@ def test_decode_summary_matches_controller_shape(monkeypatch: pytest.MonkeyPatch
     assert summary["metrics"]["direct_reclaim_lat_p95_us"] == 89
     assert summary["metrics"]["syscall_error_rate"] == 0.05
     assert summary["metrics"]["syscall_error_rate_per_sec"] == 2.5
+    assert summary["metrics"]["syscall_latency_p95_us"] == 23
+    assert summary["metrics"]["syscall_latency_count"] == 100
     assert summary["metrics"]["context_switch_rate_per_sec"] == 150.0
     assert summary["metrics"]["direct_reclaim_rate_per_sec"] == 1.0
     assert summary["metrics"]["process_churn_rate_per_sec"] == 2.0
@@ -74,7 +82,11 @@ def test_decode_summary_matches_controller_shape(monkeypatch: pytest.MonkeyPatch
 
 
 def test_aggregator_reads_summary_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(window_summary, "_host_features", lambda: {})
+    monkeypatch.setattr(
+        window_summary,
+        "_host_features",
+        lambda _prev=None: ({}, _prev),
+    )
 
     class FakeStdout:
         def __init__(self, chunks: list[bytes]) -> None:
@@ -122,7 +134,96 @@ def test_aggregator_reads_summary_records(monkeypatch: pytest.MonkeyPatch) -> No
     assert runtime.samples[0]["metrics"]["syscall_error_rate"] == pytest.approx(1 / 7)
     assert runtime.triggers == [
         (
-            "timer_window",
+            "trigger on sample delivery",
             {"window_start_unix_s": runtime.samples[0]["window_start_unix_s"]},
         )
     ]
+
+
+def test_aggregator_can_disable_sample_triggers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        window_summary,
+        "_host_features",
+        lambda _prev=None: ({}, _prev),
+    )
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self.chunks = [_summary_bytes()]
+
+        async def readexactly(self, n: int) -> bytes:
+            if not self.chunks:
+                raise asyncio.IncompleteReadError(partial=b"", expected=n)
+            return self.chunks.pop(0)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = FakeStdout()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.samples: list[dict] = []
+            self.triggers: list[tuple[str, dict]] = []
+
+        async def accept_sample(self, sample: dict) -> None:
+            self.samples.append(sample)
+
+        async def trigger_controller(self, reason: str, metadata: dict) -> None:
+            self.triggers.append((reason, metadata))
+
+        async def log_event(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+    async def run_once() -> FakeRuntime:
+        runtime = FakeRuntime()
+        aggregator = WindowSummaryAggregator(
+            ["loader"],
+            window_sec=1.0,
+            trigger_on_sample=False,
+        )
+        aggregator.process = FakeProcess()  # type: ignore[assignment]
+        await aggregator.run(runtime)
+        return runtime
+
+    runtime = asyncio.run(run_once())
+
+    assert len(runtime.samples) == 1
+    assert runtime.triggers == []
+
+
+def test_parse_cpu_stat_uses_interval_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePath:
+        calls = 0
+
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            del encoding
+            FakePath.calls += 1
+            if FakePath.calls == 1:
+                return "\n".join(
+                    [
+                        "cpu  100 0 50 850 0 0 0 0 0 0",
+                        "cpu0 50 0 25 425 0 0 0 0 0 0",
+                    ]
+                )
+            return "\n".join(
+                [
+                    "cpu  150 0 80 870 0 0 0 0 0 0",
+                    "cpu0 75 0 40 435 0 0 0 0 0 0",
+                ]
+            )
+
+    monkeypatch.setattr(window_summary, "Path", FakePath)
+    first_stats, first_snapshot = window_summary._parse_cpu_stat(None)
+    second_stats, _second_snapshot = window_summary._parse_cpu_stat(first_snapshot)
+
+    assert first_stats.get("host_cpu_count") == 1
+    assert "host_cpu_util_pct" not in first_stats
+    assert second_stats["host_cpu_util_pct"] == 80.0

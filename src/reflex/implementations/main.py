@@ -4,15 +4,14 @@ import argparse
 import asyncio
 import importlib
 import json
+import logging
 import pkgutil
 import signal
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any
 
-from reflex.core import Runtime
 import reflex.implementations.daemons as daemon_configs
+from reflex.core import Runtime
 
 
 def _repo_root() -> Path:
@@ -63,9 +62,13 @@ async def _run(args: argparse.Namespace, config: ModuleType) -> None:
         if args.execution_result_retention < 0
         else args.execution_result_retention
     )
+    event_logger: logging.Logger | None = None
+    execution_logger: logging.Logger | None = None
     if args.run_dir is not None:
         run_dir = args.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        event_logger = _configure_event_logger(run_dir, args.run_id, args.daemon_id)
+        execution_logger = _configure_execution_logger(run_dir, args.run_id, args.daemon_id)
         metadata = {
             "run_id": args.run_id,
             "daemon_id": args.daemon_id,
@@ -80,16 +83,11 @@ async def _run(args: argparse.Namespace, config: ModuleType) -> None:
             json.dumps(metadata, indent=2, default=str),
             encoding="utf-8",
         )
-        original_on_stop = daemon.on_stop
-
-        async def write_artifacts(runtime: Runtime) -> None:
-            if original_on_stop is not None:
-                await original_on_stop(runtime)
-            _write_jsonl(run_dir / "events.jsonl", runtime.events)
-            _write_jsonl(run_dir / "execution_results.jsonl", runtime.execution_results)
-
-        daemon.on_stop = write_artifacts
-    runtime = Runtime(daemon)
+    runtime = Runtime(
+        daemon,
+        event_logger=event_logger,
+        execution_logger=execution_logger,
+    )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -98,18 +96,40 @@ async def _run(args: argparse.Namespace, config: ModuleType) -> None:
     await runtime.run()
 
 
-def _jsonable(value: Any) -> Any:
-    if is_dataclass(value):
-        return asdict(value)
-    if isinstance(value, Path):
-        return str(value)
-    return str(value)
+def _configure_event_logger(run_dir: Path, run_id: str | None, daemon_id: str) -> logging.Logger:
+    logger_name = f"reflex.runtime.{daemon_id}.{run_id or 'run'}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    handler = logging.FileHandler(run_dir / "daemon.log", mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
 
 
-def _write_jsonl(path: Path, records: list[Any]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, indent=2, default=_jsonable) + "\n")
+def _configure_execution_logger(
+    run_dir: Path,
+    run_id: str | None,
+    daemon_id: str,
+) -> logging.Logger:
+    logger_name = f"reflex.execution.{daemon_id}.{run_id or 'run'}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    handler = logging.FileHandler(run_dir / "changes_applied.jsonl", mode="w", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
 
 
 def main() -> int:
@@ -139,7 +159,7 @@ def main() -> int:
         "--run-dir",
         type=Path,
         default=None,
-        help="Directory for daemon events, execution results, and run metadata.",
+        help="Directory for daemon events, changes_applied artifact, and run metadata.",
     )
     subparsers = parser.add_subparsers(
         dest="daemon_id",

@@ -201,7 +201,7 @@ run_bench() {
 
         sudo env "PATH=${PATH}" "UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/uv-cache}" \
             "${openai_env[@]}" \
-            "${UV_BIN}" run python -m reflex.implementations.main \
+            "${UV_BIN}" run reflex \
             --no-sudo \
             --run-id "sysbench-${TEST}-${mode}" \
             --run-dir "${run_dir}" \

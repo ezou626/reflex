@@ -1,13 +1,14 @@
 /*
- * reflex.c (loader2-based) — aggregates eBPF events in userspace and emits
- * one compact summary record per configured window instead of forwarding every event.
+ * reflex.c — snapshots kernel-side eBPF window aggregates and emits one
+ * compact summary record per configured window.
  *
- * Per-window summary (48 bytes packed):
+ * Per-window summary (52 bytes packed):
  *     u64 window_end_ns
  *     u32 rq_p95_us
  *     u32 rq_latency_count
  *     u32 syscall_count
  *     u32 failure_count
+ *     u32 syscall_p95_us
  *     u32 blk_p95_us
  *     u32 blk_latency_count
  *     u32 ctx_switch_count
@@ -15,42 +16,39 @@
  *     u32 direct_reclaim_p95_us
  *     u32 fork_count
  */
+#include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <inttypes.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include "reflex.skel.h"
 
 #define CGROUP_FILE "/tmp/reflex_cgroups"
 #define MAX_CGROUP_IDS 256
-#define MAX_LAT_SAMPLES 32768
 #define DEFAULT_WINDOW_NS 1000000000ULL /* 1 second */
+#define LAT_BUCKETS 32
 
-/* Must match reflex.bpf.c EVENT_* constants. */
-#define EVENT_FORK 2
-#define EVENT_SCHED_SWITCH 4
-#define EVENT_SYSCALL_EXIT 5
-#define EVENT_RQ_LATENCY 6
-#define EVENT_DIRECT_RECLAIM 7
-#define EVENT_BLK_LATENCY 8
-
-/* Mirrors struct payload in reflex.bpf.c (48 bytes). */
-struct payload
+struct aggregate
 {
-    uint32_t event_type;
-    uint32_t cpu;
-    uint32_t pid;
-    uint32_t tgid;
-    uint64_t ts_ns;
-    int32_t value_i32;
-    uint32_t value_u32;
-    char comm[16];
-} __attribute__((packed));
+    uint64_t syscall_count;
+    uint64_t syscall_failure_count;
+    uint64_t syscall_latency_count;
+    uint64_t rq_latency_count;
+    uint64_t blk_latency_count;
+    uint64_t direct_reclaim_count;
+    uint64_t fork_count;
+    uint64_t ctx_switch_count;
+    uint64_t syscall_latency_hist[LAT_BUCKETS];
+    uint64_t rq_latency_hist[LAT_BUCKETS];
+    uint64_t blk_latency_hist[LAT_BUCKETS];
+    uint64_t direct_reclaim_latency_hist[LAT_BUCKETS];
+};
 
 struct summary
 {
@@ -59,6 +57,7 @@ struct summary
     uint32_t rq_latency_count;
     uint32_t syscall_count;
     uint32_t failure_count;
+    uint32_t syscall_p95_us;
     uint32_t blk_p95_us;
     uint32_t blk_latency_count;
     uint32_t ctx_switch_count;
@@ -67,27 +66,16 @@ struct summary
     uint32_t fork_count;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct summary) == 48, "summary ABI must match Python decoder");
+_Static_assert(sizeof(struct summary) == 52, "summary ABI must match Python decoder");
 
 static struct reflex_bpf *g_skel = NULL;
 static uint64_t loaded_cgids[MAX_CGROUP_IDS];
 static int n_loaded = 0;
 static time_t last_mtime = 0;
-
-/* Per-window aggregation state. */
-static uint32_t rq_lat[MAX_LAT_SAMPLES];
-static int rq_lat_n = 0;
-static uint32_t blk_lat[MAX_LAT_SAMPLES];
-static int blk_lat_n = 0;
-static uint32_t reclaim_lat[MAX_LAT_SAMPLES];
-static int reclaim_lat_n = 0;
-static uint32_t syscall_count = 0;
-static uint32_t failure_count = 0;
-static uint32_t ctx_switch_count = 0;
-static uint32_t direct_reclaim_count = 0;
-static uint32_t fork_count = 0;
 static uint64_t window_start_ns = 0;
 static uint64_t window_ns = DEFAULT_WINDOW_NS;
+static int n_cpus = 0;
+static size_t aggregate_value_size = 0;
 
 static uint64_t now_ns(void)
 {
@@ -96,20 +84,34 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-static int cmp_u32(const void *a, const void *b)
+static uint32_t clamp_u32(uint64_t value)
 {
-    uint32_t x = *(const uint32_t *)a;
-    uint32_t y = *(const uint32_t *)b;
-    return (x > y) - (x < y);
+    return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
 }
 
-/* Sort buf and return the p95 sample (0 if empty). */
-static uint32_t compute_p95(uint32_t *buf, int n)
+static uint32_t bucket_upper_us(int bucket)
 {
-    if (n == 0)
+    if (bucket <= 0)
+        return 1;
+    if (bucket >= 31)
+        return UINT32_MAX;
+    return (uint32_t)1U << bucket;
+}
+
+static uint32_t hist_p95_us(const uint64_t hist[LAT_BUCKETS], uint64_t count)
+{
+    if (count == 0)
         return 0;
-    qsort(buf, n, sizeof(buf[0]), cmp_u32);
-    return buf[(int)(0.95 * (n - 1))];
+
+    uint64_t threshold = (count * 95 + 99) / 100;
+    uint64_t seen = 0;
+    for (int i = 0; i < LAT_BUCKETS; i++)
+    {
+        seen += hist[i];
+        if (seen >= threshold)
+            return bucket_upper_us(i);
+    }
+    return bucket_upper_us(LAT_BUCKETS - 1);
 }
 
 static void configure_window(void)
@@ -125,33 +127,106 @@ static void configure_window(void)
         window_ns = DEFAULT_WINDOW_NS;
 }
 
+static void merge_aggregate(struct aggregate *dst, const struct aggregate *src)
+{
+    dst->syscall_count += src->syscall_count;
+    dst->syscall_failure_count += src->syscall_failure_count;
+    dst->syscall_latency_count += src->syscall_latency_count;
+    dst->rq_latency_count += src->rq_latency_count;
+    dst->blk_latency_count += src->blk_latency_count;
+    dst->direct_reclaim_count += src->direct_reclaim_count;
+    dst->fork_count += src->fork_count;
+    dst->ctx_switch_count += src->ctx_switch_count;
+
+    for (int i = 0; i < LAT_BUCKETS; i++)
+    {
+        dst->syscall_latency_hist[i] += src->syscall_latency_hist[i];
+        dst->rq_latency_hist[i] += src->rq_latency_hist[i];
+        dst->blk_latency_hist[i] += src->blk_latency_hist[i];
+        dst->direct_reclaim_latency_hist[i] += src->direct_reclaim_latency_hist[i];
+    }
+}
+
+static int read_window_aggregate(struct aggregate *out)
+{
+    __u32 key = 0;
+    char *values = calloc((size_t)n_cpus, aggregate_value_size);
+    if (!values)
+        return -ENOMEM;
+
+    int err = bpf_map_lookup_elem(bpf_map__fd(g_skel->maps.window_agg), &key, values);
+    if (err)
+    {
+        int saved = errno;
+        free(values);
+        return -saved;
+    }
+
+    memset(out, 0, sizeof(*out));
+    for (int cpu = 0; cpu < n_cpus; cpu++)
+    {
+        const struct aggregate *cpu_value =
+            (const struct aggregate *)(values + (size_t)cpu * aggregate_value_size);
+        merge_aggregate(out, cpu_value);
+    }
+
+    free(values);
+    return 0;
+}
+
+static int clear_window_aggregate(void)
+{
+    __u32 key = 0;
+    char *zeros = calloc((size_t)n_cpus, aggregate_value_size);
+    if (!zeros)
+        return -ENOMEM;
+
+    int err = bpf_map_update_elem(bpf_map__fd(g_skel->maps.window_agg), &key, zeros, BPF_ANY);
+    if (err)
+    {
+        int saved = errno;
+        free(zeros);
+        return -saved;
+    }
+
+    free(zeros);
+    return 0;
+}
+
 static void flush_summary(void)
 {
+    struct aggregate agg;
+    int err = read_window_aggregate(&agg);
+    if (err)
+    {
+        fprintf(stderr, "Failed to read aggregate %d\n", err);
+        return;
+    }
+
     struct summary s = {
         .window_end_ns = now_ns(),
-        .rq_p95_us = compute_p95(rq_lat, rq_lat_n),
-        .rq_latency_count = (uint32_t)rq_lat_n,
-        .syscall_count = syscall_count,
-        .failure_count = failure_count,
-        .blk_p95_us = compute_p95(blk_lat, blk_lat_n),
-        .blk_latency_count = (uint32_t)blk_lat_n,
-        .ctx_switch_count = ctx_switch_count,
-        .direct_reclaim_count = direct_reclaim_count,
-        .direct_reclaim_p95_us = compute_p95(reclaim_lat, reclaim_lat_n),
-        .fork_count = fork_count,
+        .rq_p95_us = hist_p95_us(agg.rq_latency_hist, agg.rq_latency_count),
+        .rq_latency_count = clamp_u32(agg.rq_latency_count),
+        .syscall_count = clamp_u32(agg.syscall_count),
+        .failure_count = clamp_u32(agg.syscall_failure_count),
+        .syscall_p95_us = hist_p95_us(agg.syscall_latency_hist, agg.syscall_latency_count),
+        .blk_p95_us = hist_p95_us(agg.blk_latency_hist, agg.blk_latency_count),
+        .blk_latency_count = clamp_u32(agg.blk_latency_count),
+        .ctx_switch_count = clamp_u32(agg.ctx_switch_count),
+        .direct_reclaim_count = clamp_u32(agg.direct_reclaim_count),
+        .direct_reclaim_p95_us = hist_p95_us(
+            agg.direct_reclaim_latency_hist,
+            agg.direct_reclaim_count
+        ),
+        .fork_count = clamp_u32(agg.fork_count),
     };
 
     fwrite(&s, sizeof(s), 1, stdout);
     fflush(stdout);
 
-    rq_lat_n = 0;
-    blk_lat_n = 0;
-    reclaim_lat_n = 0;
-    syscall_count = 0;
-    failure_count = 0;
-    ctx_switch_count = 0;
-    direct_reclaim_count = 0;
-    fork_count = 0;
+    err = clear_window_aggregate();
+    if (err)
+        fprintf(stderr, "Failed to clear aggregate %d\n", err);
     window_start_ns = now_ns();
 }
 
@@ -187,46 +262,6 @@ static void check_cgroup_file(void)
     fclose(f);
 }
 
-static int handle_event(void *ctx, void *data, size_t data_size)
-{
-    (void)ctx;
-    if (data_size < sizeof(struct payload))
-        return 0;
-
-    const struct payload *p = (const struct payload *)data;
-    switch (p->event_type)
-    {
-    case EVENT_SYSCALL_EXIT:
-        syscall_count++;
-        if (p->value_i32 < 0)
-            failure_count++;
-        break;
-    case EVENT_RQ_LATENCY:
-        if (rq_lat_n < MAX_LAT_SAMPLES)
-            rq_lat[rq_lat_n++] = p->value_u32;
-        break;
-    case EVENT_BLK_LATENCY:
-        if (blk_lat_n < MAX_LAT_SAMPLES)
-            blk_lat[blk_lat_n++] = p->value_u32;
-        break;
-    case EVENT_SCHED_SWITCH:
-        ctx_switch_count += p->value_u32 ? p->value_u32 : 1;
-        break;
-    case EVENT_DIRECT_RECLAIM:
-        direct_reclaim_count++;
-        if (reclaim_lat_n < MAX_LAT_SAMPLES)
-            reclaim_lat[reclaim_lat_n++] = p->value_u32;
-        break;
-    case EVENT_FORK:
-        fork_count++;
-        break;
-    default:
-        break;
-    }
-
-    return 0;
-}
-
 int main(int argc, char **argv)
 {
     uint32_t py_pid = 0;
@@ -237,8 +272,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "Py_pid %u\n", py_pid);
     }
 
+    n_cpus = libbpf_num_possible_cpus();
+    if (n_cpus <= 0)
+    {
+        fprintf(stderr, "Failed to determine possible CPU count\n");
+        return 1;
+    }
+    aggregate_value_size = sizeof(struct aggregate);
+
     struct reflex_bpf *skel;
-    struct ring_buffer *rb = NULL;
     int err;
 
     struct rlimit rlim = {
@@ -270,6 +312,13 @@ int main(int argc, char **argv)
         add_cgid(strtoull(argv[i], NULL, 10));
     check_cgroup_file();
 
+    err = clear_window_aggregate();
+    if (err)
+    {
+        fprintf(stderr, "Failed to initialize aggregate %d\n", err);
+        goto cleanup;
+    }
+
     err = reflex_bpf__attach(skel);
     if (err)
     {
@@ -277,17 +326,10 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    rb = ring_buffer__new(bpf_map__fd(skel->maps.events), handle_event, NULL, NULL);
-    if (!rb)
-    {
-        fprintf(stderr, "Error with RB\n");
-        goto cleanup;
-    }
-
     window_start_ns = now_ns();
     while (1)
     {
-        ring_buffer__poll(rb, 100);
+        usleep(100000);
         check_cgroup_file();
         if (now_ns() - window_start_ns >= window_ns)
             flush_summary();
@@ -295,7 +337,6 @@ int main(int argc, char **argv)
 
 cleanup:
     fprintf(stderr, "Cleanup\n");
-    ring_buffer__free(rb);
     reflex_bpf__destroy(skel);
     return 0;
 }
